@@ -1,4 +1,5 @@
 import transporter from "../../config/mail.js";
+import { buildGenericDispatchedEmail } from "../../templates/emails/emailTemplates.js";
 
 const isValidEmail = (value) =>
   typeof value === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
@@ -24,6 +25,24 @@ export const sendEmail = async (req, res) => {
     const rawFrom = process.env.MAIL_FROM_ADDRESS || process.env.EMAIL_FROM || process.env.GMAIL_USER || "noreply@api.vyaparsathi.udittiwari.in";
     const fromAddress = rawFrom.includes("<") ? rawFrom : `Vyapar Sakha <${rawFrom}>`;
 
+    // Ensure all outgoing messages (from AI agent or custom sends) look gorgeous and brand-consistent
+    let styledHtml = html;
+    if (html && !html.includes("<!DOCTYPE html>")) {
+      styledHtml = buildGenericDispatchedEmail({
+        subject,
+        htmlBody: html,
+        storeName: "Vyapar Sakha",
+        badgeText: "Official Communication",
+      });
+    } else if (!styledHtml && text) {
+      styledHtml = buildGenericDispatchedEmail({
+        subject,
+        htmlBody: `<p style="font-size: 15px; color: #334155; line-height: 1.7; white-space: pre-wrap;">${text}</p>`,
+        storeName: "Vyapar Sakha",
+        badgeText: "Message",
+      });
+    }
+
     let emailId = null;
 
     if (transporter && typeof transporter.sendMail === "function") {
@@ -33,7 +52,7 @@ export const sendEmail = async (req, res) => {
         subject,
         ...(replyTo ? { replyTo } : {}),
         ...(text ? { text } : {}),
-        ...(html ? { html } : {}),
+        ...(styledHtml ? { html: styledHtml } : {}),
         ...(attachments ? { attachments } : {}),
       });
       emailId = result?.messageId || null;
@@ -44,7 +63,7 @@ export const sendEmail = async (req, res) => {
         subject,
         ...(replyTo ? { reply_to: replyTo } : {}),
         ...(text ? { text } : {}),
-        ...(html ? { html } : {}),
+        ...(styledHtml ? { html: styledHtml } : {}),
         ...(attachments ? { attachments } : {}),
       });
 

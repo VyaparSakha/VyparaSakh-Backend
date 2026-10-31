@@ -3,6 +3,7 @@ import Inventory from "../../models/inventory.model.js";
 import Sale from "../../models/sale.model.js";
 import Store from "../../models/store.model.js";
 import { sendMailWithRetry, sendLowStockNotificationEmail } from "../../utils/mailer.js";
+import { buildHealthyInventoryEmail, buildSalesSummaryEmail } from "../../templates/emails/emailTemplates.js";
 import { scheduledQueue, addAiTask } from "../../queues/aiQueue.js";
 import { buildCronExpression, calculateOneTimeDelay } from "../../utils/cronHelper.js";
 
@@ -184,19 +185,18 @@ export const executeAutomationWorkflow = async (automationId) => {
                         console.log(`✉️ [AUTOMATION MAILER] Low stock notification email sent to ${recipientEmail}`);
                     } else {
                         // Send healthy inventory notification so recipient receives email status confirmation
+                        const healthyHtml = buildHealthyInventoryEmail({
+                            storeName: automation.store?.storeName || automation.store?.name || "Vyapar Sakha Store",
+                            storeId: storeId,
+                            totalProductsCount: 0,
+                            toEmail: recipientEmail,
+                            formattedDate: `${istTimeStr} IST`,
+                        });
+
                         await sendMailWithRetry({
                             to: recipientEmail,
                             subject: `✅ Inventory Health Status - ${automation.store?.storeName || automation.store?.name || "Vyapar Sakha"}`,
-                            html: `<div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 24px; background: #ffffff; border-radius: 12px; border: 1px solid #cbd5e1; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
-                                <div style="background: linear-gradient(135deg, #059669, #10b981); padding: 20px; border-radius: 8px; color: #ffffff; text-align: center; margin-bottom: 20px;">
-                                    <h2 style="margin: 0;">✅ All Inventory Healthy</h2>
-                                    <p style="margin: 5px 0 0 0; opacity: 0.9; font-size: 13px;">${automation.store?.storeName || automation.store?.name || "Vyapar Sakha Store"}</p>
-                                </div>
-                                <div style="font-size: 14px; color: #334155; line-height: 1.6;">
-                                    <p>Good news! All products in your inventory are currently well stocked above minimum thresholds.</p>
-                                    <p style="font-size: 12px; color: #64748b; margin-top: 16px;">🕒 <strong>Check Time:</strong> ${istTimeStr} IST</p>
-                                </div>
-                            </div>`,
+                            html: healthyHtml,
                         });
                         console.log(`✉️ [AUTOMATION MAILER] Inventory healthy status email sent to ${recipientEmail}`);
                     }
@@ -217,20 +217,18 @@ export const executeAutomationWorkflow = async (automationId) => {
                 const totalRevenue = salesToday.reduce((acc, s) => acc + (s.totalAmount || 0), 0);
 
                 if (recipientEmail) {
+                    const salesHtml = buildSalesSummaryEmail({
+                        storeName: automation.store?.storeName || automation.store?.name || "Vyapar Sakha Store",
+                        storeId: storeId,
+                        salesCount: salesToday.length,
+                        totalRevenue: totalRevenue,
+                        formattedDate: `${istTimeStr} IST`,
+                    });
+
                     await sendMailWithRetry({
                         to: recipientEmail,
                         subject: `📊 Daily Sales Summary Report - ${automation.store?.storeName || automation.store?.name || "Vyapar Sakha"}`,
-                        html: `<div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 24px; background: #ffffff; border-radius: 12px; border: 1px solid #cbd5e1; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
-                            <div style="background: linear-gradient(135deg, #2563eb, #4f46e5); padding: 20px; border-radius: 8px; color: #ffffff; text-align: center; margin-bottom: 20px;">
-                                <h2 style="margin: 0;">📊 Sales Summary Report</h2>
-                                <p style="margin: 5px 0 0 0; opacity: 0.9; font-size: 13px;">${automation.store?.storeName || automation.store?.name || "Vyapar Sakha Store"}</p>
-                            </div>
-                            <div style="font-size: 14px; color: #334155; line-height: 1.6;">
-                                <p>🕒 <strong>Report Generated:</strong> ${istTimeStr} IST</p>
-                                <p>🛍️ <strong>Total Orders Today:</strong> <strong style="color: #2563eb;">${salesToday.length} sale(s)</strong></p>
-                                <p>💰 <strong>Total Revenue Today:</strong> <strong style="color: #059669; font-size: 18px;">₹${totalRevenue.toFixed(2)}</strong></p>
-                            </div>
-                        </div>`,
+                        html: salesHtml,
                     });
                     console.log(`✉️ [AUTOMATION MAILER] Sales summary email sent to ${recipientEmail}`);
                 }
