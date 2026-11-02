@@ -1,7 +1,7 @@
 import { Cart } from "../../models/index.js";
 import { Product } from "../../models/index.js";
 import { ApiError } from "../../utils/ApiError.js";
-import { assertCartAccess } from "../store/storeAccess.service.js";
+import { assertCartAccess, assertStoreOwner } from "../store/storeAccess.service.js";
 import { materializeSaleFromCart } from "../sale/sale.service.js";
 
 export const createCart = async (cartData) => {
@@ -200,3 +200,113 @@ export const getBillHistory = async (storeId, limit = 50, page = 1, filters = {}
     throw error;
   }
 };
+
+
+/**
+ * Optimized Single-Trip Checkout
+ * Handles item validation, cart session, payment, and inventory update in ONE atomic step.
+ */
+export const quickCheckout = async (userId, checkoutData) => {
+  if (!userId) {
+    throw new ApiError("User not registered. Please complete registration first.", 403);
+  }
+
+  const {
+    storeId,
+    products,
+    paymentMethod = "cash",
+    subtotal,
+    discount,
+    totalAmount,
+    buyerId,
+    customerName,
+    customerPhone,
+    customerEmail,
+  } = checkoutData;
+
+  if (!storeId || !products || !Array.isArray(products) || !products.length) {
+    throw new ApiError("Store and products are required for checkout", 400);
+  }
+
+  // Verify access to store
+  await assertStoreOwner(storeId, userId);
+
+  // Fetch all products in ONE single batch query
+  const productIds = products.map((p) => p._id || p.productId);
+  const dbProducts = await Product.find({ _id: { $in: productIds } });
+  const productMap = new Map(dbProducts.map((p) => [p._id.toString(), p]));
+
+  // Build cart items array
+  const cartProducts = [];
+  let calculatedSubtotal = 0;
+
+  for (const item of products) {
+    const pId = String(item._id || item.productId);
+    const product = productMap.get(pId);
+    if (!product) {
+      throw new ApiError(`Product not found: ${item.name || pId}`, 404);
+    }
+
+    const qty = Number(item.billedQuantity || item.quantity || 1);
+    if (product.quantity < qty) {
+      throw new ApiError(
+        `Insufficient stock for "${product.name}". Available: ${product.quantity}, Requested: ${qty}`,
+        400,
+      );
+    }
+
+    const price = Number(product.sellingPrice ?? product.price ?? item.price ?? 0);
+    cartProducts.push({
+      product: product._id,
+      quantity: qty,
+      price,
+    });
+    calculatedSubtotal += price * qty;
+  }
+
+  // Reuse open cart or create a new cart
+  let cart = await Cart.findOne({
+    user: userId,
+    store: storeId,
+    status: { $in: ["open", "scanning"] },
+  });
+
+  if (!cart) {
+    cart = new Cart({
+      user: userId,
+      store: storeId,
+    });
+  }
+
+  const finalSubtotal = subtotal !== undefined ? Number(subtotal) : calculatedSubtotal;
+  const finalDiscount = discount || { type: "fixed", value: 0, amount: 0 };
+  const finalTotal =
+    totalAmount !== undefined
+      ? Number(totalAmount)
+      : Math.max(0, finalSubtotal - (Number(finalDiscount.amount) || 0));
+
+  cart.products = cartProducts;
+  cart.subtotal = finalSubtotal;
+  cart.discount = finalDiscount;
+  cart.totalPrice = finalTotal;
+  cart.paymentId = `${paymentMethod}-${Date.now()}`;
+  cart.paymentMethod = paymentMethod;
+  cart.paymentStatus = "paid";
+  cart.status = "payment_pending";
+  cart.buyer = buyerId || null;
+  cart.customerName = customerName || "Walk-in Customer";
+  cart.customerPhone = customerPhone || "";
+  cart.customerEmail = customerEmail || "";
+
+  await cart.save();
+
+  // Finalize sale and inventory automatically
+  const result = await materializeSaleFromCart(cart._id, userId);
+
+  return {
+    ...(result.cart.toObject ? result.cart.toObject() : result.cart),
+    saleId: result.sale?._id,
+    billNumber: result.sale?.billNumber || result.cart?.billNumber,
+  };
+};
+

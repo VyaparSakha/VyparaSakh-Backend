@@ -7,12 +7,14 @@ import {
   confirmPaymentController,
   getProductByBarcodeController,
   getBillHistoryController,
+  quickCheckoutController,
 } from "./cart.controller.js";
 import authMiddleware from "../../middlewares/auth.middleware.js";
 import requireUser from "../../middlewares/requireUser.middleware.js";
 
 const router = express.Router();
 
+router.post("/quick-checkout", authMiddleware, quickCheckoutController);
 router.post("/create", authMiddleware, createCartController);
 router.patch("/:cartId/start-scan", authMiddleware, startScanningController);
 router.get(
