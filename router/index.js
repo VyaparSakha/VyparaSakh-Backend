@@ -6,6 +6,7 @@ import cartRoutes from "../modules/cart/cart.routes.js";
 import saleRoutes from "../modules/sale/sale.routes.js";
 import aiRoutes from "../modules/ai/ai.routes.js";
 import inviteRoutes from "../modules/invite/invite.routes.js";
+import invitationRoutes from "../modules/invitation/invitation.routes.js";
 import analyticsRoutes from "../modules/analytics/analytics.route.js";
 import sellerRoutes from "../modules/seller/seller.routes.js";
 import purchaseRoutes from "../modules/purchase/purchase.routes.js";
@@ -21,7 +22,11 @@ const router = Router();
 router.use("/auth", authRoutes);
 router.use("/user", userRoutes);
 router.use("/me", meRoutes);
+
+// Support both /stores and /store for RESTful and legacy compatibility
+router.use("/stores", storeRoutes);
 router.use("/store", storeRoutes);
+
 // /api/product  → store-scoped product management (authenticated)
 // /api/products → global barcode resolver (public + authenticated routes)
 router.use("/product", productRoutes);
@@ -29,7 +34,11 @@ router.use("/products", productRoutes);
 router.use("/cart", cartRoutes);
 router.use("/sales", saleRoutes);
 router.use("/ai", aiRoutes);
-router.use("/invite", inviteRoutes);
+
+// Support both /invitations and /invite
+router.use("/invitations", invitationRoutes);
+router.use("/invite", invitationRoutes);
+
 router.use("/analytics", analyticsRoutes);
 router.use("/sellers", sellerRoutes);
 router.use("/purchases", purchaseRoutes);

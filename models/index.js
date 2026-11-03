@@ -16,8 +16,31 @@ import Expense from './expense.model.js';
 import Notification from './notification.model.js';
 import PurchaseOrder from './purchaseOrder.model.js';
 import GRN from './grn.model.js';
+import Invitation from './invitation.model.js';
+import AuditLog from './auditLog.model.js';
 
-export { Store, Product, Inventory, User, Cart, Sale, MasterProduct, Role, Employee, Seller, Purchase, PurchaseReturn, Buyer, Payment, Expense, Notification, PurchaseOrder, GRN };
+export {
+    Store,
+    Product,
+    Inventory,
+    User,
+    Cart,
+    Sale,
+    MasterProduct,
+    Role,
+    Employee,
+    Seller,
+    Purchase,
+    PurchaseReturn,
+    Buyer,
+    Payment,
+    Expense,
+    Notification,
+    PurchaseOrder,
+    GRN,
+    Invitation,
+    AuditLog
+};
 
 export default {
     Store,
@@ -37,5 +60,7 @@ export default {
     Expense,
     Notification,
     PurchaseOrder,
-    GRN
+    GRN,
+    Invitation,
+    AuditLog
 };

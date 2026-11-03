@@ -9,7 +9,7 @@ const router = Router({ mergeParams: true });
 router.use(authMiddleware);
 router.use(requireUser);
 
-// Routes that any authenticated employee can access
+// Routes that any authenticated employee can access (legacy)
 router.post("/accept/:employeeId", employeeController.acceptInviteController);
 
 // Administrative routes - Require Store Ownership
@@ -20,7 +20,12 @@ router.route("/")
   .post(employeeController.inviteEmployeeController);
 
 router.route("/:employeeId")
+  .get(employeeController.getEmployeeByIdController)
   .put(employeeController.updateEmployeeController)
   .delete(employeeController.removeEmployeeController);
+
+router.put("/:employeeId/role", employeeController.updateEmployeeRoleController);
+router.post("/:employeeId/suspend", employeeController.suspendEmployeeController);
+router.post("/:employeeId/reactivate", employeeController.reactivateEmployeeController);
 
 export default router;

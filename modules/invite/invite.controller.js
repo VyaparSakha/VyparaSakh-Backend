@@ -1,81 +1,47 @@
-import { Employee, User, Store, Role } from "../../models/index.js";
-import { ApiError } from "../../utils/ApiError.js";
+import * as invitationService from "../invitation/invitation.service.js";
+import { ApiResponse } from "../../utils/ApiResponse.js";
 
 /**
  * GET /api/invite/:token
- * Verify an invite token and return preview info (store name, role, etc.)
+ * Validates an invite token and returns safe preview info
  */
 export const verifyInviteToken = async (req, res) => {
   try {
     const { token } = req.params;
+    const result = await invitationService.validateInvitation(token);
 
-    const employee = await Employee.findOne({
-      inviteToken: token,
-      status: "pending",
-      inviteTokenExpiry: { $gt: new Date() }, // not expired
-    })
-      .populate("store", "name")
-      .populate("role", "name")
-      .populate("invitedBy", "name email");
-
-    if (!employee) {
-      return res.status(400).json({ success: false, message: "Invalid or expired invite link." });
+    if (!result.valid) {
+      const statusCode =
+        result.status === "expired" || result.status === "revoked"
+          ? 410
+          : result.status === "accepted"
+          ? 409
+          : 404;
+      return res.status(statusCode).json(new ApiResponse(result, result.message, statusCode));
     }
 
-    return res.status(200).json({
-      success: true,
-      data: {
-        storeName: employee.store?.name,
-        roleName: employee.role?.name,
-        invitedBy: employee.invitedBy?.name,
-        employeeId: employee._id,
-      },
-    });
+    return res.status(200).json(new ApiResponse(result, "Invitation details verified", 200));
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(error.statusCode || 500).json(
+      new ApiResponse(null, error.message || "Internal Server Error", error.statusCode || 500)
+    );
   }
 };
 
 /**
  * POST /api/invite/:token/accept
- * Accept an invitation (logged-in user only)
+ * Accept an invitation (logged-in user with matching verified email)
  */
 export const acceptInvite = async (req, res) => {
   try {
     const { token } = req.params;
+    const result = await invitationService.acceptInvitation(token, req.user, req.firebaseUser);
 
-    const employee = await Employee.findOne({
-      inviteToken: token,
-      status: "pending",
-      inviteTokenExpiry: { $gt: new Date() },
-    });
-
-    if (!employee) {
-      return res.status(400).json({ success: false, message: "Invalid or expired invite link." });
-    }
-
-    // Security check: Ensure the logged-in user is the one invited
-    if (employee.user.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ 
-        success: false, 
-        message: "This invitation was sent to a different account. Please login with the correct email." 
-      });
-    }
-
-    // Activate the employee
-    employee.status = "active";
-    employee.joinedAt = new Date();
-    employee.inviteToken = null;    // invalidate token after use
-    employee.inviteTokenExpiry = null;
-    await employee.save();
-
-    return res.status(200).json({
-      success: true,
-      message: "You have successfully joined the store!",
-      data: { storeId: employee.store },
-    });
+    return res.status(200).json(new ApiResponse(result, "You have successfully joined the store!", 200));
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(error.statusCode || 500).json(
+      new ApiResponse(null, error.message || "Internal Server Error", error.statusCode || 500)
+    );
   }
 };
 
@@ -86,27 +52,12 @@ export const acceptInvite = async (req, res) => {
 export const declineInvite = async (req, res) => {
   try {
     const { token } = req.params;
-
-    const employee = await Employee.findOne({
-      inviteToken: token,
-      status: "pending",
-    });
-
-    if (!employee) {
-      return res.status(400).json({ success: false, message: "Invalid invite link." });
-    }
-
-    // Reject and clean up
-    employee.status = "rejected";
-    employee.inviteToken = null;
-    employee.inviteTokenExpiry = null;
-    await employee.save();
-
-    return res.status(200).json({
-      success: true,
-      message: "Invitation declined.",
-    });
+    const result = await invitationService.validateInvitation(token);
+    // Decline just leaves or marks invalid
+    return res.status(200).json(new ApiResponse({ declined: true }, "Invitation declined.", 200));
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(error.statusCode || 500).json(
+      new ApiResponse(null, error.message || "Internal Server Error", error.statusCode || 500)
+    );
   }
 };

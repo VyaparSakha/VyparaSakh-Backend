@@ -1,4 +1,4 @@
-import { Role } from "../../models/index.js";
+import { Role, Employee, Invitation } from "../../models/index.js";
 import { ApiError } from "../../utils/ApiError.js";
 import { SYSTEM_ROLES } from "../../utils/permissions.js";
 
@@ -33,8 +33,6 @@ export const seedSystemRoles = async (storeId, userId) => {
  */
 export const getRolesByStore = async (storeId) => {
   try {
-    // First, ensure system roles are there (optional, can be done on store creation)
-    // For now, let's just fetch what exists.
     const roles = await Role.find({ store: storeId }).sort({ isSystem: -1, createdAt: 1 });
     return roles;
   } catch (error) {
@@ -98,6 +96,7 @@ export const updateRole = async (roleId, storeId, roleData) => {
 
 /**
  * Delete a role (Custom roles only)
+ * Ensures that no active/pending employees or pending invitations reference the role.
  */
 export const deleteRole = async (roleId, storeId) => {
   try {
@@ -111,8 +110,35 @@ export const deleteRole = async (roleId, storeId) => {
       throw new ApiError("System roles cannot be deleted", 403);
     }
 
-    // TODO: check if any employees are using this role before deleting
-    // For now, we delete it directly.
+    if (Employee && typeof Employee.countDocuments === "function") {
+      const activeEmployeesCount = await Employee.countDocuments({
+        store: storeId,
+        role: roleId,
+        status: { $in: ["active", "pending"] },
+      });
+
+      if (activeEmployeesCount > 0) {
+        throw new ApiError(
+          `Cannot delete role because it is currently assigned to ${activeEmployeesCount} employee(s).`,
+          409
+        );
+      }
+    }
+
+    if (Invitation && typeof Invitation.countDocuments === "function") {
+      const pendingInvitesCount = await Invitation.countDocuments({
+        store: storeId,
+        role: roleId,
+        status: "pending",
+      });
+
+      if (pendingInvitesCount > 0) {
+        throw new ApiError(
+          `Cannot delete role because it is referenced by ${pendingInvitesCount} pending invitation(s).`,
+          409
+        );
+      }
+    }
 
     await Role.deleteOne({ _id: roleId });
     return role;

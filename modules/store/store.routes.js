@@ -14,6 +14,7 @@ import requireOwner from "../../middlewares/requireOwner.middleware.js";
 import { requireStoreCreationEligibility } from "../../middlewares/storePolicy.middleware.js";
 import roleRoutes from "../role/role.routes.js";
 import employeeRoutes from "../employee/employee.routes.js";
+import storeInvitationRoutes from "../invitation/storeInvitation.routes.js";
 
 const router = Router();
 
@@ -24,9 +25,10 @@ router.use(requireUser);
 router.route("/all").get(storeGetAllController);
 router.route("/create").post(requireStoreCreationEligibility, storeCreateController);
 
-// Nested routes for roles and employees under a specific store
+// Nested routes for roles, employees, and invitations under a specific store
 router.use("/:storeId/roles", roleRoutes);
 router.use("/:storeId/employees", employeeRoutes);
+router.use("/:storeId/invitations", storeInvitationRoutes);
 
 router.route("/:storeId/overview").get(storeOverviewController);
 

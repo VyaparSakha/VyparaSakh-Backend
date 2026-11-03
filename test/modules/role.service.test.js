@@ -1,18 +1,25 @@
 import { jest } from "@jest/globals";
 import mongoose from "mongoose";
 
-// Mock Role model
+// Mock models
 jest.unstable_mockModule("../../models/index.js", () => ({
   Role: {
     insertMany: jest.fn(),
     find: jest.fn(),
     findOne: jest.fn(),
     create: jest.fn(),
+    deleteOne: jest.fn(),
+  },
+  Employee: {
+    countDocuments: jest.fn(),
+  },
+  Invitation: {
+    countDocuments: jest.fn(),
   },
 }));
 
-const { Role } = await import("../../models/index.js");
-const { seedSystemRoles, createCustomRole } = await import("../../modules/role/role.service.js");
+const { Role, Employee, Invitation } = await import("../../models/index.js");
+const { seedSystemRoles, createCustomRole, deleteRole } = await import("../../modules/role/role.service.js");
 
 describe("Role Service", () => {
   const storeId = new mongoose.Types.ObjectId().toString();
@@ -75,6 +82,27 @@ describe("Role Service", () => {
 
       await expect(createCustomRole(storeId, userId, { name: "Manager", permissions: [] }))
         .rejects.toThrow("Role with name 'Manager' already exists in this store");
+    });
+  });
+
+  describe("deleteRole", () => {
+    test("should prevent deleting a role in use by active employees", async () => {
+      const roleId = new mongoose.Types.ObjectId().toString();
+      Role.findOne.mockResolvedValue({ _id: roleId, store: storeId, isSystem: false });
+      Employee.countDocuments.mockResolvedValue(2);
+
+      await expect(deleteRole(roleId, storeId))
+        .rejects.toThrow("Cannot delete role because it is currently assigned to 2 employee(s).");
+    });
+
+    test("should prevent deleting a role in use by pending invitations", async () => {
+      const roleId = new mongoose.Types.ObjectId().toString();
+      Role.findOne.mockResolvedValue({ _id: roleId, store: storeId, isSystem: false });
+      Employee.countDocuments.mockResolvedValue(0);
+      Invitation.countDocuments.mockResolvedValue(1);
+
+      await expect(deleteRole(roleId, storeId))
+        .rejects.toThrow("Cannot delete role because it is referenced by 1 pending invitation(s).");
     });
   });
 });

@@ -1,150 +1,228 @@
+import mongoose from "mongoose";
 import { Employee, User, Role, Store } from "../../models/index.js";
 import { ApiError } from "../../utils/ApiError.js";
-import { sendInviteEmail } from "../../utils/mailer.js";
-import crypto from "crypto";
+import { logAudit } from "../../utils/auditLogger.js";
+import * as invitationService from "../invitation/invitation.service.js";
 
 /**
- * Invite an employee to a store — generates a secure token and sends an email.
+ * Invite an employee to a store.
+ * Delegates to the secure invitation service separating Invitation from Employee.
  */
 export const inviteEmployee = async (storeId, invitedByUserId, employeeData) => {
-  const { email, roleId } = employeeData;
+  return invitationService.createInvitation(storeId, invitedByUserId, employeeData);
+};
 
-  if (!email || !roleId) {
-    throw new ApiError("Email and role are required", 400);
+/**
+ * Get all employees in a store.
+ */
+export const getEmployeesByStore = async (storeId) => {
+  return Employee.find({ store: storeId })
+    .populate("user", "name email profilePicture phone")
+    .populate("role", "name permissions isSystem");
+};
+
+/**
+ * Get single employee details in a store.
+ */
+export const getEmployeeById = async (storeId, employeeId) => {
+  if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+    throw new ApiError("Invalid employee ID format", 400);
   }
 
-  const normalizedEmail = email.trim().toLowerCase();
-  const userToInvite = await User.findOne({ email: normalizedEmail });
-  if (!userToInvite) {
-    throw new ApiError(`User with email '${email}' not found. They must register first.`, 404);
+  const employee = await Employee.findOne({ _id: employeeId, store: storeId })
+    .populate("user", "name email profilePicture phone")
+    .populate("role", "name permissions isSystem")
+    .populate("invitedBy", "name email");
+
+  if (!employee) {
+    throw new ApiError("Employee record not found", 404);
   }
 
-  const existingEmployee = await Employee.findOne({ store: storeId, user: userToInvite._id });
-  if (existingEmployee) {
-    throw new ApiError("User is already an employee of this store", 409);
+  return employee;
+};
+
+/**
+ * Updates an employee's assigned role.
+ * Strictly checks role existence, store ownership, and prevents privilege escalation.
+ */
+export const updateEmployeeRole = async (storeId, employeeId, actorUserId, newRoleId) => {
+  if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+    throw new ApiError("Invalid employee ID format", 400);
   }
 
-  const role = await Role.findOne({ _id: roleId });
+  if (!newRoleId) {
+    throw new ApiError("New role ID is required", 400);
+  }
+
+  const employee = await Employee.findOne({ _id: employeeId, store: storeId });
+  if (!employee) {
+    throw new ApiError("Employee record not found", 404);
+  }
+
+  // Prevent employee from modifying their own role
+  if (actorUserId && employee.user.toString() === actorUserId.toString()) {
+    throw new ApiError("Employees cannot modify their own roles", 403);
+  }
+
+  const role = await Role.findById(newRoleId);
   if (!role) {
-    throw new ApiError("Role not found", 404);
+    throw new ApiError("New role not found", 404);
   }
+
   if (role.store && role.store.toString() !== storeId.toString()) {
     throw new ApiError("Role does not belong to this store", 403);
   }
 
-  // Generate a secure random token (valid for 48 hours)
-  const inviteToken = crypto.randomBytes(32).toString("hex");
-  const inviteTokenExpiry = new Date(Date.now() + 48 * 60 * 60 * 1000);
+  // Explicit assignment - no mass assignment
+  employee.role = newRoleId;
+  await employee.save();
 
-  const employee = await Employee.create({
-    store: storeId,
-    user: userToInvite._id,
-    role: roleId,
-    invitedBy: invitedByUserId,
-    status: "pending",
-    inviteToken,
-    inviteTokenExpiry,
+  await logAudit({
+    storeId,
+    actorUserId,
+    targetUserId: employee.user,
+    employeeId: employee._id,
+    action: "employee.role_updated",
+    metadata: {
+      newRoleId: role._id.toString(),
+      newRoleName: role.name,
+    },
   });
 
-  // Fetch store + inviter info for the email
-  const [store, inviter] = await Promise.all([
-    Store.findById(storeId).select("name"),
-    User.findById(invitedByUserId).select("name"),
-  ]);
+  return employee.populate("role", "name permissions");
+};
 
-  // Send the invitation email (non-blocking — don't fail the whole request if email fails)
-  sendInviteEmail(normalizedEmail, {
-    storeName: store?.name || "the store",
-    roleName: role.name,
-    ownerName: inviter?.name || "The owner",
-    inviteToken,
-  }).catch((err) => {
-    console.error("Failed to send invite email:", err);
-    console.log(`\n[FALLBACK] Copy this invite link for ${normalizedEmail}: ${process.env.FRONTEND_URL}/invite/${inviteToken}\n`);
+/**
+ * Update an employee's role or status (backward compatible wrapper).
+ * Avoids unrestricted mass assignment.
+ */
+export const updateEmployee = async (employeeId, storeId, updateData, actorUserId) => {
+  if (updateData.role) {
+    return updateEmployeeRole(storeId, employeeId, actorUserId, updateData.role);
+  }
+
+  const employee = await Employee.findOne({ _id: employeeId, store: storeId });
+  if (!employee) {
+    throw new ApiError("Employee record not found", 404);
+  }
+
+  // Only allow updating permitted fields
+  if (updateData.status) {
+    const allowedStatuses = ["active", "suspended", "rejected"];
+    if (!allowedStatuses.includes(updateData.status)) {
+      throw new ApiError("Invalid status value", 400);
+    }
+    employee.status = updateData.status;
+  }
+
+  await employee.save();
+  return employee;
+};
+
+/**
+ * Suspends an employee membership.
+ */
+export const suspendEmployee = async (storeId, employeeId, actorUserId) => {
+  if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+    throw new ApiError("Invalid employee ID format", 400);
+  }
+
+  const employee = await Employee.findOne({ _id: employeeId, store: storeId });
+  if (!employee) {
+    throw new ApiError("Employee record not found", 404);
+  }
+
+  if (actorUserId && employee.user.toString() === actorUserId.toString()) {
+    throw new ApiError("Cannot suspend yourself", 400);
+  }
+
+  employee.status = "suspended";
+  await employee.save();
+
+  await logAudit({
+    storeId,
+    actorUserId,
+    targetUserId: employee.user,
+    employeeId: employee._id,
+    action: "employee.suspended",
   });
 
   return employee;
 };
 
 /**
- * Get all employees in a store
+ * Reactivates a suspended employee membership.
  */
-export const getEmployeesByStore = async (storeId) => {
-  try {
-    const employees = await Employee.find({ store: storeId })
-      .populate("user", "name email profilePicture")
-      .populate("role", "name permissions");
-    return employees;
-  } catch (error) {
-    throw error;
+export const reactivateEmployee = async (storeId, employeeId, actorUserId) => {
+  if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+    throw new ApiError("Invalid employee ID format", 400);
   }
+
+  const employee = await Employee.findOne({ _id: employeeId, store: storeId });
+  if (!employee) {
+    throw new ApiError("Employee record not found", 404);
+  }
+
+  employee.status = "active";
+  await employee.save();
+
+  await logAudit({
+    storeId,
+    actorUserId,
+    targetUserId: employee.user,
+    employeeId: employee._id,
+    action: "employee.reactivated",
+  });
+
+  return employee;
 };
 
 /**
- * Update an employee's role or status
+ * Removes an employee membership from a store.
+ * NOTE: Removes the store Employee membership; preserves the global User account.
  */
-export const updateEmployee = async (employeeId, storeId, updateData) => {
-  try {
-    const employee = await Employee.findOne({ _id: employeeId, store: storeId });
-    if (!employee) {
-      throw new ApiError("Employee record not found", 404);
-    }
-
-    // If updating role, verify the new role belongs to this store
-    if (updateData.role) {
-      const role = await Role.findOne({ _id: updateData.role });
-      if (!role) throw new ApiError("New role not found", 404);
-      if (role.store && role.store.toString() !== storeId.toString()) {
-        throw new ApiError("Role does not belong to this store", 403);
-      }
-    }
-
-    employee.set(updateData);
-    await employee.save();
-
-    return employee;
-  } catch (error) {
-    throw error;
+export const removeEmployee = async (employeeId, storeId, actorUserId) => {
+  if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+    throw new ApiError("Invalid employee ID format", 400);
   }
+
+  const employee = await Employee.findOne({ _id: employeeId, store: storeId });
+  if (!employee) {
+    throw new ApiError("Employee record not found", 404);
+  }
+
+  if (actorUserId && employee.user.toString() === actorUserId.toString()) {
+    throw new ApiError("Cannot remove yourself from your own store", 400);
+  }
+
+  await Employee.deleteOne({ _id: employeeId, store: storeId });
+
+  await logAudit({
+    storeId,
+    actorUserId,
+    targetUserId: employee.user,
+    employeeId: employee._id,
+    action: "employee.removed",
+  });
+
+  return employee;
 };
 
 /**
- * Remove an employee from a store
- * NOTE: Removes employee membership, preserves global User account.
- */
-export const removeEmployee = async (employeeId, storeId) => {
-  try {
-    const employee = await Employee.findOne({ _id: employeeId, store: storeId });
-    if (!employee) {
-      throw new ApiError("Employee record not found", 404);
-    }
-
-    await Employee.deleteOne({ _id: employeeId });
-    return employee;
-  } catch (error) {
-    throw error;
-  }
-};
-
-/**
- * Accept invite (called by the employee themselves)
+ * Accept invite (called by the employee themselves - legacy support).
  */
 export const acceptInvite = async (userId, employeeId) => {
-  try {
-    const employee = await Employee.findOne({ _id: employeeId, user: userId });
-    if (!employee) {
-      throw new ApiError("Invitation not found", 404);
-    }
-    if (employee.status !== "pending") {
-      throw new ApiError(`Invitation is already ${employee.status}`, 400);
-    }
-
-    employee.status = "active";
-    employee.joinedAt = new Date();
-    await employee.save();
-
-    return employee;
-  } catch (error) {
-    throw error;
+  const employee = await Employee.findOne({ _id: employeeId, user: userId });
+  if (!employee) {
+    throw new ApiError("Invitation not found", 404);
   }
+  if (employee.status !== "pending") {
+    throw new ApiError(`Invitation is already ${employee.status}`, 400);
+  }
+
+  employee.status = "active";
+  employee.joinedAt = new Date();
+  await employee.save();
+
+  return employee;
 };
