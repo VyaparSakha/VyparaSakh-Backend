@@ -120,7 +120,8 @@ export const sendInviteEmail = async (
   { storeName, roleName, ownerName, inviteToken },
   retryOpts = {}
 ) => {
-  const inviteUrl = `${process.env.FRONTEND_URL}/invite/${inviteToken}`;
+  const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/+$/, "");
+  const inviteUrl = `${frontendUrl}/invite/${inviteToken}`;
 
   const html = buildInviteEmail({
     storeName,

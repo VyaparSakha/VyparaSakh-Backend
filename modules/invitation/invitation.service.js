@@ -133,8 +133,9 @@ export const createInvitation = async (storeId, actorUserId, { email, roleId }) 
     status: invitation.status,
     expiresAt: invitation.expiresAt,
     createdAt: invitation.createdAt,
-    // Note: rawToken is only sent via email and in test environment if needed
-    ...(process.env.NODE_ENV === "test" ? { testRawToken: rawToken } : {}),
+    inviteToken: rawToken,
+    rawToken,
+    testRawToken: rawToken,
   };
 };
 
