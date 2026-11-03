@@ -2,9 +2,12 @@ import { Router } from "express";
 import dotenv from "dotenv";
 dotenv.config();
 import { createProxyMiddleware } from "http-proxy-middleware";
+import mongoose from "mongoose";
 
 import authMiddleware from "../../middlewares/auth.middleware.js";
 import requireUser from "../../middlewares/requireUser.middleware.js";
+import { Store, Employee, User } from "../../models/index.js";
+import { ALL_PERMISSIONS } from "../../utils/permissions.js";
 
 import http from "http";
 import https from "https";
@@ -13,11 +16,151 @@ const router = Router();
 
 
 // ============================================================================
-// Authentication
+// Authentication & Store Context Resolution
 // ============================================================================
 
 router.use(authMiddleware);
 router.use(requireUser);
+
+/**
+ * AI Store Context Resolution Middleware
+ * Resolves user membership (Owner or Employee), injects role and permissions,
+ * checks store-level AI subscription quota, and attaches forwarded headers.
+ */
+const resolveAiStoreContext = async (req, res, next) => {
+  try {
+    let storeId =
+      req.params?.storeId ||
+      req.query?.storeId ||
+      req.headers?.["x-store-id"] ||
+      req.body?.storeId ||
+      req.body?.store;
+
+    if (!storeId && req.originalUrl) {
+      const match = req.originalUrl.match(/^\/api\/ai\/([^/?#]+)/);
+      if (match && match[1] && mongoose.Types.ObjectId.isValid(match[1])) {
+        storeId = match[1];
+      }
+    }
+
+    // Pass through if request is not store-scoped
+    if (!storeId) {
+      return next();
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(storeId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid store ID format",
+        statusCode: 400,
+      });
+    }
+
+    const userId = req.user?._id;
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: "User context missing",
+        statusCode: 401,
+      });
+    }
+
+    const store = await Store.findById(storeId);
+    if (!store) {
+      return res.status(404).json({
+        success: false,
+        message: "Store not found",
+        statusCode: 404,
+      });
+    }
+
+    const storeOwnerId = store.owner?._id ? store.owner._id.toString() : store.owner?.toString();
+    const currentUserId = userId.toString();
+    const currentStoreId = store._id.toString();
+
+    let authContext = null;
+
+    if (storeOwnerId === currentUserId) {
+      // User is the Store Owner
+      authContext = {
+        storeId: currentStoreId,
+        userId: currentUserId,
+        membershipType: "owner",
+        isOwner: true,
+        roleName: "Owner",
+        permissions: ALL_PERMISSIONS,
+      };
+    } else {
+      // Check active employee membership
+      const employee = await Employee.findOne({
+        store: store._id,
+        user: userId,
+        status: "active",
+      }).populate("role");
+
+      if (!employee || !employee.role) {
+        return res.status(403).json({
+          success: false,
+          message: "Access Denied: You do not have permission to access this store workspace AI.",
+          statusCode: 403,
+        });
+      }
+
+      authContext = {
+        storeId: currentStoreId,
+        userId: currentUserId,
+        membershipType: "employee",
+        isOwner: false,
+        roleName: employee.role.name || "Employee",
+        permissions: Array.isArray(employee.role.permissions) ? employee.role.permissions : [],
+      };
+    }
+
+    // Check account-level AI credit quota on the Store Owner's account
+    const billableOwner = authContext.isOwner
+      ? req.user
+      : await User.findById(store.owner);
+
+    if (billableOwner && typeof billableOwner.hasAiCredits === "function" && !billableOwner.hasAiCredits()) {
+      const quotaMessage = authContext.isOwner
+        ? "Your account AI monthly query quota has been reached. Please upgrade your plan in Account Settings."
+        : "Store owner's account AI subscription quota reached. Please notify your store owner to upgrade or renew their account plan.";
+      return res.status(402).json({
+        success: false,
+        message: quotaMessage,
+        statusCode: 402,
+      });
+    }
+
+    // Increment AI credit usage for the store owner's account asynchronously
+    if (billableOwner && typeof billableOwner.consumeAiCredit === "function") {
+      billableOwner.consumeAiCredit(1).catch((err) => {
+        console.error("[AI QUOTA] Failed to consume AI credit for owner account:", billableOwner._id, err.message);
+      });
+    }
+
+    req.store = store;
+    req.authContext = authContext;
+    req.aiHeaders = {
+      "x-store-id": authContext.storeId,
+      "x-user-id": authContext.userId,
+      "x-is-owner": authContext.isOwner ? "true" : "false",
+      "x-user-role": authContext.roleName,
+      "x-user-permissions": authContext.permissions.join(","),
+    };
+
+    next();
+  } catch (err) {
+    console.error("[AI AUTH] Error resolving AI store context:", err);
+    res.status(500).json({
+      success: false,
+      message: err.message || "Failed to resolve store AI authorization",
+      statusCode: 500,
+    });
+  }
+};
+
+router.use(resolveAiStoreContext);
 
 
 // ============================================================================
@@ -75,6 +218,13 @@ const aiProxy = createProxyMiddleware({
           req.user._id.toString()
         );
 
+      }
+
+      if (req.aiHeaders) {
+        proxyReq.setHeader("x-store-id", req.aiHeaders["x-store-id"]);
+        proxyReq.setHeader("x-is-owner", req.aiHeaders["x-is-owner"]);
+        proxyReq.setHeader("x-user-role", req.aiHeaders["x-user-role"]);
+        proxyReq.setHeader("x-user-permissions", req.aiHeaders["x-user-permissions"]);
       }
 
     },
@@ -176,6 +326,29 @@ const sseProxy = async (req, res) => {
   // Request options
   // --------------------------------------------------------------------------
 
+  const headers = {
+    "Content-Type":
+      "application/json",
+
+    "Content-Length":
+      Buffer.byteLength(body),
+
+    "Accept":
+      "text/event-stream",
+
+    "x-user-id":
+      req.user
+        ? req.user._id.toString()
+        : "",
+  };
+
+  if (req.aiHeaders) {
+    headers["x-store-id"] = req.aiHeaders["x-store-id"];
+    headers["x-is-owner"] = req.aiHeaders["x-is-owner"];
+    headers["x-user-role"] = req.aiHeaders["x-user-role"];
+    headers["x-user-permissions"] = req.aiHeaders["x-user-permissions"];
+  }
+
   const options = {
 
     hostname: targetUrl.hostname,
@@ -186,23 +359,7 @@ const sseProxy = async (req, res) => {
 
     method: "POST",
 
-    headers: {
-
-      "Content-Type":
-        "application/json",
-
-      "Content-Length":
-        Buffer.byteLength(body),
-
-      "Accept":
-        "text/event-stream",
-
-      "x-user-id":
-        req.user
-          ? req.user._id.toString()
-          : "",
-
-    },
+    headers,
 
   };
 

@@ -19,6 +19,7 @@ jest.unstable_mockModule(
   "../../../modules/store/storeAccess.service.js",
   () => ({
     assertCartAccess: mockAssertCartAccess,
+    assertStoreOwner: jest.fn(),
   })
 );
 
