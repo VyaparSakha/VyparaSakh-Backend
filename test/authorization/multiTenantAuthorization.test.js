@@ -64,6 +64,14 @@ jest.unstable_mockModule("../../models/index.js", () => ({
     find: jest.fn(),
     create: jest.fn(),
   },
+  Invitation: {
+    find: jest.fn(() => ({
+      populate: jest.fn().mockReturnThis(),
+      sort: jest.fn().mockResolvedValue([]),
+    })),
+    findOne: jest.fn(),
+    create: jest.fn(),
+  },
   User: {
     findOne: jest.fn(),
   },

@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { Store, Employee } from "../../models/index.js";
+import { Store, Employee, Invitation } from "../../models/index.js";
 import { ALL_PERMISSIONS } from "../../utils/permissions.js";
 
 /**
@@ -88,5 +88,67 @@ export const getUserWorkspaces = async (userId) => {
   }
 
   return Array.from(workspacesMap.values());
+};
+
+/**
+ * Returns current user's AI subscription status and credit usage.
+ */
+export const getUserAiSubscription = async (user) => {
+  if (!user) return null;
+  // Auto-rollover check
+  if (typeof user.hasAiCredits === "function") {
+    user.hasAiCredits();
+  }
+  return user.aiSubscription || {
+    plan: "free",
+    monthlyLimit: 250,
+    usedCredits: 0,
+    status: "active",
+  };
+};
+
+/**
+ * Returns all staff and pending invitations across all stores owned by the user.
+ */
+export const getOrganizationStaff = async (ownerId) => {
+  if (!ownerId) {
+    return { stores: [], employees: [], pendingInvitations: [] };
+  }
+
+  const ownerObjectId = new mongoose.Types.ObjectId(ownerId);
+
+  // 1. All stores owned by this user
+  const ownedStores = await Store.find({
+    owner: ownerObjectId,
+    isActive: true,
+  }).select("_id name businessType logo phone address");
+
+  const storeIds = ownedStores.map((s) => s._id);
+
+  if (storeIds.length === 0) {
+    return { stores: [], employees: [], pendingInvitations: [] };
+  }
+
+  // 2. All employees in these stores
+  const employees = await Employee.find({ store: { $in: storeIds } })
+    .populate("user", "name email profilePicture phone")
+    .populate("role", "name permissions isSystem")
+    .populate("store", "name businessType logo")
+    .sort({ createdAt: -1 });
+
+  // 3. All pending invitations in these stores
+  const pendingInvitations = await Invitation.find({
+    store: { $in: storeIds },
+    status: "pending",
+  })
+    .populate("role", "name permissions")
+    .populate("store", "name businessType logo")
+    .sort({ createdAt: -1 });
+
+  return {
+    stores: ownedStores,
+    employees,
+    pendingInvitations,
+  };
 };
 
