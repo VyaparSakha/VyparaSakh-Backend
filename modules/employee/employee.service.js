@@ -13,7 +13,8 @@ export const inviteEmployee = async (storeId, invitedByUserId, employeeData) => 
     throw new ApiError("Email and role are required", 400);
   }
 
-  const userToInvite = await User.findOne({ email });
+  const normalizedEmail = email.trim().toLowerCase();
+  const userToInvite = await User.findOne({ email: normalizedEmail });
   if (!userToInvite) {
     throw new ApiError(`User with email '${email}' not found. They must register first.`, 404);
   }
@@ -27,7 +28,7 @@ export const inviteEmployee = async (storeId, invitedByUserId, employeeData) => 
   if (!role) {
     throw new ApiError("Role not found", 404);
   }
-  if (!role.isSystem && role.store.toString() !== storeId.toString()) {
+  if (role.store && role.store.toString() !== storeId.toString()) {
     throw new ApiError("Role does not belong to this store", 403);
   }
 
@@ -52,14 +53,14 @@ export const inviteEmployee = async (storeId, invitedByUserId, employeeData) => 
   ]);
 
   // Send the invitation email (non-blocking — don't fail the whole request if email fails)
-  sendInviteEmail(email, {
+  sendInviteEmail(normalizedEmail, {
     storeName: store?.name || "the store",
     roleName: role.name,
     ownerName: inviter?.name || "The owner",
     inviteToken,
   }).catch((err) => {
     console.error("Failed to send invite email:", err);
-    console.log(`\n[FALLBACK] Copy this invite link for ${email}: ${process.env.FRONTEND_URL}/invite/${inviteToken}\n`);
+    console.log(`\n[FALLBACK] Copy this invite link for ${normalizedEmail}: ${process.env.FRONTEND_URL}/invite/${inviteToken}\n`);
   });
 
   return employee;
@@ -89,13 +90,13 @@ export const updateEmployee = async (employeeId, storeId, updateData) => {
       throw new ApiError("Employee record not found", 404);
     }
 
-    // If updating role, verify the new role
+    // If updating role, verify the new role belongs to this store
     if (updateData.role) {
-        const role = await Role.findOne({ _id: updateData.role });
-        if (!role) throw new ApiError("New role not found", 404);
-        if (!role.isSystem && role.store.toString() !== storeId.toString()) {
-            throw new ApiError("Role does not belong to this store", 403);
-        }
+      const role = await Role.findOne({ _id: updateData.role });
+      if (!role) throw new ApiError("New role not found", 404);
+      if (role.store && role.store.toString() !== storeId.toString()) {
+        throw new ApiError("Role does not belong to this store", 403);
+      }
     }
 
     employee.set(updateData);
@@ -109,6 +110,7 @@ export const updateEmployee = async (employeeId, storeId, updateData) => {
 
 /**
  * Remove an employee from a store
+ * NOTE: Removes employee membership, preserves global User account.
  */
 export const removeEmployee = async (employeeId, storeId) => {
   try {
@@ -128,21 +130,21 @@ export const removeEmployee = async (employeeId, storeId) => {
  * Accept invite (called by the employee themselves)
  */
 export const acceptInvite = async (userId, employeeId) => {
-    try {
-        const employee = await Employee.findOne({ _id: employeeId, user: userId });
-        if (!employee) {
-            throw new ApiError("Invitation not found", 404);
-        }
-        if (employee.status !== 'pending') {
-            throw new ApiError(`Invitation is already ${employee.status}`, 400);
-        }
-
-        employee.status = 'active';
-        employee.joinedAt = new Date();
-        await employee.save();
-
-        return employee;
-    } catch (error) {
-        throw error;
+  try {
+    const employee = await Employee.findOne({ _id: employeeId, user: userId });
+    if (!employee) {
+      throw new ApiError("Invitation not found", 404);
     }
+    if (employee.status !== "pending") {
+      throw new ApiError(`Invitation is already ${employee.status}`, 400);
+    }
+
+    employee.status = "active";
+    employee.joinedAt = new Date();
+    await employee.save();
+
+    return employee;
+  } catch (error) {
+    throw error;
+  }
 };

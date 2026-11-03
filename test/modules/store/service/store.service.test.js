@@ -587,7 +587,7 @@ describe("store.service.getStoresByOwner", () => {
                   "$$value",
                   {
                     $multiply: [
-                      "$$this.price",
+                      { $ifNull: ["$$this.sellingPrice", { $ifNull: ["$$this.price", 0] }] },
                       { $ifNull: ["$$this.quantity", 0] },
                     ],
                   },

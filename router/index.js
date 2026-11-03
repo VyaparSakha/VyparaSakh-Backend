@@ -13,12 +13,14 @@ import buyerRoutes from "../modules/buyer/buyer.routes.js";
 import notificationRoutes from "../modules/notification/notification.routes.js";
 import purchaseOrderRoutes from "../modules/purchaseOrder/purchaseOrder.routes.js";
 import grnRoutes from "../modules/grn/grn.routes.js";
+import meRoutes from "../modules/me/me.routes.js";
 import { Router } from "express";
 
 const router = Router();
 
 router.use("/auth", authRoutes);
 router.use("/user", userRoutes);
+router.use("/me", meRoutes);
 router.use("/store", storeRoutes);
 // /api/product  → store-scoped product management (authenticated)
 // /api/products → global barcode resolver (public + authenticated routes)
@@ -37,4 +39,3 @@ router.use("/purchase-orders", purchaseOrderRoutes);
 router.use("/grns", grnRoutes);
 
 export default router;
-

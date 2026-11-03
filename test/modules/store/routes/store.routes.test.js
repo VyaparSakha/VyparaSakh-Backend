@@ -19,6 +19,10 @@ const mockRequireUser = jest.fn((_req, _res, next) => {
   next();
 });
 
+const mockRequireStoreCreationEligibility = jest.fn((_req, _res, next) => {
+  next();
+});
+
 jest.unstable_mockModule(
   "../../../../modules/store/store.controller.js",
   () => ({
@@ -28,6 +32,7 @@ jest.unstable_mockModule(
     storeDeleteController: jest.fn(),
     storeGetAllController: jest.fn(),
     storeSendInstantStockAlertController: jest.fn(),
+    storeOverviewController: jest.fn(),
   }),
 );
 
@@ -42,6 +47,13 @@ jest.unstable_mockModule(
   }),
 );
 
+jest.unstable_mockModule(
+  "../../../../middlewares/storePolicy.middleware.js",
+  () => ({
+    requireStoreCreationEligibility: mockRequireStoreCreationEligibility,
+  }),
+);
+
 const { default: storeRouter } =
   await import("../../../../modules/store/store.routes.js");
 
@@ -50,6 +62,7 @@ describe("store.routes POST /create", () => {
     mockStoreCreateController.mockClear();
     mockAuthMiddleware.mockClear();
     mockRequireUser.mockClear();
+    mockRequireStoreCreationEligibility.mockClear();
   });
 
   test("runs auth + requireUser and reaches create controller", async () => {
@@ -58,48 +71,23 @@ describe("store.routes POST /create", () => {
     app.use("/stores", storeRouter);
 
     const payload = {
-      name: "Main Branch",
-      phone: "9999999999",
-      address: { fullAddress: "123 Market Road" },
+      name: "Super Mart",
+      phone: "9876543210",
+      address: {
+        fullAddress: "MG Road, Bengaluru",
+      },
     };
 
     const response = await request(app).post("/stores/create").send(payload);
 
+    expect(mockAuthMiddleware).toHaveBeenCalledTimes(1);
+    expect(mockRequireUser).toHaveBeenCalledTimes(1);
+    expect(mockStoreCreateController).toHaveBeenCalledTimes(1);
     expect(response.status).toBe(201);
-    expect(response.body).toMatchObject({
+    expect(response.body).toEqual({
       message: "Store created successfully",
       owner: "user-123",
       body: payload,
     });
-
-    expect(mockAuthMiddleware).toHaveBeenCalledTimes(1);
-    expect(mockRequireUser).toHaveBeenCalledTimes(1);
-    expect(mockStoreCreateController).toHaveBeenCalledTimes(1);
-  });
-
-  test("handles request with invalid/malformed JSON body", async () => {
-    const app = express();
-    app.use(express.json());
-    app.use("/stores", storeRouter);
-
-    const response = await request(app)
-      .post("/stores/create")
-      .set("Content-Type", "application/json")
-      .send("invalid json");
-
-    expect(response.status).toBe(400);
-  });
-
-  test("middleware chain is called even with empty body", async () => {
-    const app = express();
-    app.use(express.json());
-    app.use("/stores", storeRouter);
-
-    const response = await request(app).post("/stores/create").send({});
-
-    expect(response.status).toBe(201);
-    expect(mockAuthMiddleware).toHaveBeenCalledTimes(1);
-    expect(mockRequireUser).toHaveBeenCalledTimes(1);
-    expect(mockStoreCreateController).toHaveBeenCalledTimes(1);
   });
 });

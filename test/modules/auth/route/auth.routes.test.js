@@ -69,6 +69,7 @@ jest.unstable_mockModule("../../../../modules/auth/auth.controller.js", () => ({
   register: mockRegisterController,
   login: mockLoginController,
   getUserProfile: mockGetUserProfileController,
+  updateUserProfile: jest.fn(),
 }));
 
 jest.unstable_mockModule("../../../../middlewares/auth.middleware.js", () => ({

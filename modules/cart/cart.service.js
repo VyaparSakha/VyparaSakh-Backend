@@ -7,7 +7,7 @@ import { materializeSaleFromCart } from "../sale/sale.service.js";
 export const createCart = async (cartData) => {
   try {
     if (!cartData.user || !cartData.store) {
-      throw new ApiError(400, "User and Store references are required");
+      throw new ApiError("User and Store references are required", 400);
     }
 
     let cart = await Cart.findOne({
@@ -29,7 +29,7 @@ export const createCart = async (cartData) => {
 
     cart = await Cart.create(cartData);
     if (!cart) {
-      throw new ApiError(400, "Failed to create cart");
+      throw new ApiError("Failed to create cart", 400);
     }
     return cart;
   } catch (error) {
@@ -43,21 +43,22 @@ export const startScanning = async (cartId) => {
     { status: "scanning" },
     { new: true },
   );
-  if (!cart) throw new ApiError(404, "Cart not found");
+  if (!cart) throw new ApiError("Cart not found", 404);
   return cart;
 };
 
 export const addItemToCart = async (cartId, productId, quantity = 1) => {
   const cart = await Cart.findById(cartId);
-  if (!cart) throw new ApiError(404, "Cart not found");
+  if (!cart) throw new ApiError("Cart not found", 404);
   if (cart.status !== "scanning" && cart.status !== "open") {
-    throw new ApiError(400, "Cannot add items to cart in current status");
+    throw new ApiError("Cannot add items to cart in current status", 400);
   }
 
-  const product = await Product.findById(productId);
-  if (!product) throw new ApiError(404, "Product not found");
+  // Cross-tenant data isolation: Product must belong to the cart's store
+  const product = await Product.findOne({ _id: productId, store: cart.store });
+  if (!product) throw new ApiError("Product not found in this store", 404);
   if (product.quantity < quantity)
-    throw new ApiError(400, "Insufficient stock");
+    throw new ApiError("Insufficient stock", 400);
 
   const productPrice = Number(product.sellingPrice ?? product.price ?? 0);
 
@@ -78,37 +79,43 @@ export const addItemToCart = async (cartId, productId, quantity = 1) => {
 
   // Recalculate total price safely
   cart.totalPrice = cart.products.reduce(
-    (acc, curr) => acc + (Number(curr.price) || 0) * (Number(curr.quantity) || 0),
-    0,
+    (sum, item) => sum + (Number(item.price) || 0) * (Number(item.quantity) || 0),
+    0
   );
 
   await cart.save();
   return cart;
 };
 
-export const processPayment = async (cartId, paymentId, subtotal, discount, totalPrice, buyer, customerName, customerPhone, customerEmail) => {
+export const processPayment = async (
+  cartId,
+  paymentMethod,
+  amountPaid,
+  metadata = {},
+) => {
   const cart = await Cart.findById(cartId);
-  if (!cart) throw new ApiError(404, "Cart not found");
+  if (!cart) throw new ApiError("Cart not found", 404);
+  if (cart.status === "completed") {
+    throw new ApiError("Cart is already completed", 400);
+  }
 
-  cart.paymentId = paymentId;
+  cart.paymentMethod = paymentMethod;
+  cart.amountPaid = amountPaid;
   cart.paymentStatus = "paid";
-  cart.status = "payment_pending"; // Waiting for owner confirmation
-
-  if (subtotal !== undefined) cart.subtotal = subtotal;
-  if (discount !== undefined) cart.discount = discount;
-  if (totalPrice !== undefined) cart.totalPrice = totalPrice;
-  if (buyer) cart.buyer = buyer;
-  if (customerName) cart.customerName = customerName;
-  if (customerPhone) cart.customerPhone = customerPhone;
-  if (customerEmail) cart.customerEmail = customerEmail;
+  cart.paymentMetadata = metadata;
 
   await cart.save();
   return cart;
 };
 
 export const confirmPayment = async (cartId, userId) => {
+  console.log(`[CART SERVICE] Confirming payment for cart=${cartId}`);
+
   if (!userId) {
-    throw new ApiError("User not registered. Please complete registration first.", 403);
+    throw new ApiError(
+      "User not registered. Please complete registration first.",
+      403,
+    );
   }
 
   const cart = await assertCartAccess(cartId, userId);
@@ -117,10 +124,9 @@ export const confirmPayment = async (cartId, userId) => {
     throw new ApiError("Payment hasn't been made yet", 400);
   }
 
-  console.log(`[CART SERVICE] Confirming payment for cart=${cartId}`);
   const result = await materializeSaleFromCart(cartId, userId);
   console.log(
-    `[CART SERVICE] Payment confirmation completed for cart=${cartId} saleCreated=${result.saleCreated}`
+    `[CART SERVICE] Payment confirmation completed for cart=${cartId} saleCreated=${Boolean(result.sale)}`,
   );
 
   return result.cart;
@@ -128,7 +134,7 @@ export const confirmPayment = async (cartId, userId) => {
 
 export const getProductByBarcodeInCart = async (cartId, barcode) => {
   const cart = await Cart.findById(cartId);
-  if (!cart) throw new ApiError(404, "Cart not found");
+  if (!cart) throw new ApiError("Cart not found", 404);
 
   const product = await Product.findOne({
     store: cart.store,
@@ -138,8 +144,8 @@ export const getProductByBarcodeInCart = async (cartId, barcode) => {
 
   if (!product) {
     throw new ApiError(
-      404,
       "Product not found in this store with this barcode",
+      404,
     );
   }
 
@@ -149,7 +155,7 @@ export const getProductByBarcodeInCart = async (cartId, barcode) => {
 export const getBillHistory = async (storeId, limit = 50, page = 1, filters = {}) => {
   try {
     if (!storeId) {
-      throw new ApiError(400, "Store ID is required");
+      throw new ApiError("Store ID is required", 400);
     }
 
     const { date, month, year } = filters;
@@ -179,21 +185,21 @@ export const getBillHistory = async (storeId, limit = 50, page = 1, filters = {}
     const skip = (page - 1) * limit;
 
     const bills = await Cart.find(query)
+      .populate("products.product", "name price sellingPrice buyingPrice")
       .populate("user", "name email")
-      .populate("products.product", "name barcode")
       .sort({ updatedAt: -1 })
-      .limit(limit)
-      .skip(skip);
+      .skip(skip)
+      .limit(limit);
 
     const total = await Cart.countDocuments(query);
 
     return {
       bills,
       pagination: {
-        total,
         page,
         limit,
-        totalPages: Math.ceil(total / limit),
+        total,
+        pages: Math.ceil(total / limit),
       },
     };
   } catch (error) {

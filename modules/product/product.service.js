@@ -5,8 +5,8 @@ import { normalizeProduct } from "./normalizer.service.js";
 //create product service
 export const addProduct = async (productData) => {
     try {
-        if (!productData.name || !productData.category || productData.sellingPrice === undefined || productData.buyingPrice === undefined) {
-            throw new ApiError("Name, category, selling price, and buying price are required", 400);
+        if (!productData.name || !productData.category || (productData.price === undefined && productData.sellingPrice === undefined)) {
+            throw new ApiError("Name, category, and price are required", 400);
         }
 
         if (!productData.store) {
@@ -48,10 +48,15 @@ export const addProduct = async (productData) => {
     }
 };
 
-//get product by id service
-export const getProductById = async (productId) => {
+//get product by id service (store-scoped when storeId provided)
+export const getProductById = async (productId, storeId = null) => {
     try {
-        const product = await Product.findById(productId);
+        let product;
+        if (storeId) {
+            product = await Product.findOne({ _id: productId, store: storeId });
+        } else {
+            product = await Product.findById(productId);
+        }
         if (!product) {
             throw new ApiError("Product not found", 404);
         }
@@ -61,10 +66,15 @@ export const getProductById = async (productId) => {
     }
 };
 
-//update product by id service
-export const updateProductById = async (productId, productData) => {
+//update product by id service (store-scoped when storeId provided)
+export const updateProductById = async (productId, productData, storeId = null) => {
     try {
-        const product = await Product.findById(productId);
+        let product;
+        if (storeId) {
+            product = await Product.findOne({ _id: productId, store: storeId });
+        } else {
+            product = await Product.findById(productId);
+        }
         if (!product) {
             throw new ApiError("Product not found", 404);
         }
@@ -79,6 +89,8 @@ export const updateProductById = async (productId, productData) => {
             delete productData.quantityDelta;
             delete productData.quantity;
         }
+        // Protect against changing store ownership
+        delete productData.store;
         product.set(productData);
         await product.save();
         return product;
@@ -87,10 +99,15 @@ export const updateProductById = async (productId, productData) => {
     }
 };
 
-//delete product by id service
-export const deleteProductById = async (productId) => {
+//delete product by id service (store-scoped when storeId provided)
+export const deleteProductById = async (productId, storeId = null) => {
     try {
-        const product = await Product.findById(productId);
+        let product;
+        if (storeId) {
+            product = await Product.findOne({ _id: productId, store: storeId });
+        } else {
+            product = await Product.findById(productId);
+        }
         if (!product) {
             throw new ApiError("Product not found", 404);
         }
@@ -108,101 +125,119 @@ export const getAllProducts = async (storeId) => {
         if (!storeId) {
             throw new ApiError("Store ID is required to fetch products", 400);
         }
-        const query = { store: storeId, isActive: true };
-        const products = await Product.find(query).populate('store', 'name').populate('createdBy', 'name email');
+
+        const products = await Product.find({
+            store: storeId,
+            isActive: true
+        }).populate("store", "name").populate("createdBy", "name email");
+
         return products;
     } catch (error) {
         throw error;
     }
 };
 
-// Search active products within a store by name, barcode, or SKU.
-export const searchProducts = async (query, storeId) => {
-    if (!query?.trim()) return [];
-    if (!storeId) {
-        throw new ApiError("Store ID is required to search products", 400);
-    }
-
-    const escapedQuery = query.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const matcher = { $regex: escapedQuery, $options: 'i' };
-
-    return Product.find({
-        store: storeId,
-        isActive: true,
-        $or: [
-            { name: matcher },
-            { barcode: matcher },
-            { sku: matcher }
-        ]
-    }).populate('store', 'name');
-};
-
-export const searchProductsInStore = searchProducts;
-
-//get product by barcode service (for auto-fill when scanning)
+//get product by barcode service (store-scoped)
 export const getProductByBarcode = async (barcode, storeId) => {
     try {
         if (!barcode) {
             throw new ApiError("Barcode is required", 400);
         }
+
         if (!storeId) {
             throw new ApiError("Store ID is required for barcode lookup", 400);
         }
 
-        const query = { barcode, store: storeId, isActive: true };
-        const product = await Product.findOne(query).populate('store', 'name');
+        const query = Product.findOne({
+            barcode: barcode.trim(),
+            store: storeId,
+            isActive: true
+        });
+
+        const product = query && typeof query.populate === "function"
+            ? await query.populate("store", "name")
+            : await query;
+
         return product;
     } catch (error) {
         throw error;
     }
 };
 
-/**
- * Lookup a barcode in the MasterProduct (global catalog) without hitting external APIs.
- * Returns the MasterProduct document or null if not found.
- *
- * @param {string} barcode
- * @returns {Promise<object|null>}
- */
-export const getMasterProduct = async (barcode) => {
-    if (!barcode || barcode.trim() === "") {
-        throw new ApiError("Barcode is required", 400);
+// Search products by name or barcode within a specific store
+export const searchProductsInStore = async (query, storeId) => {
+    try {
+        if (!storeId) {
+            throw new ApiError("Store reference is required", 400);
+        }
+
+        if (!query || query.trim() === "") {
+            return [];
+        }
+
+        const trimmed = query.trim();
+        const searchRegex = new RegExp(trimmed, 'i');
+
+        const products = await Product.find({
+            store: storeId,
+            isActive: true,
+            $or: [
+                { name: searchRegex },
+                { barcode: searchRegex },
+                { category: searchRegex }
+            ]
+        }).limit(20);
+
+        return products;
+    } catch (error) {
+        throw error;
     }
-    const master = await MasterProduct.findOne({ barcode: barcode.trim() });
-    return master || null;
 };
 
-/**
- * Save a product to the global MasterProduct catalog.
- * Idempotent: skips saving if the barcode already exists.
- * Normalizes data before persisting so the catalog stays clean.
- *
- * @param {{ barcode: string, name?: string, brand?: string, category?: string, image?: string, source?: string }} productData
- * @returns {Promise<{ saved: boolean, product: object|null }>}
- */
+// MasterProduct: lookup by barcode (shared catalog across stores)
+export const getMasterProduct = async (barcode) => {
+    try {
+        if (!barcode || typeof barcode !== "string" || barcode.trim() === "") {
+            throw new ApiError("Barcode is required", 400);
+        }
+
+        const masterProduct = await MasterProduct.findOne({ barcode: barcode.trim() });
+        return masterProduct;
+    } catch (error) {
+        throw error;
+    }
+};
+
+// MasterProduct: save a product to the master catalog (idempotent — won't overwrite existing)
 export const saveMasterProduct = async (productData) => {
-    if (!productData?.barcode || productData.barcode.trim() === "") {
-        throw new ApiError("Barcode is required to save to master catalog", 400);
+    try {
+        if (!productData || !productData.barcode || typeof productData.barcode !== "string" || productData.barcode.trim() === "") {
+            throw new ApiError("Barcode is required to save to master catalog", 400);
+        }
+
+        const barcode = productData.barcode.trim();
+
+        const existing = await MasterProduct.findOne({ barcode });
+        if (existing) {
+            return { saved: false, product: existing };
+        }
+
+        const normalized = normalizeProduct(productData);
+
+        const newMasterProduct = await MasterProduct.create({
+            barcode,
+            name: normalized.name,
+            category: normalized.category,
+            brand: normalized.brand || null,
+            description: normalized.description || null,
+            imageUrl: normalized.imageUrl || null,
+            source: normalized.source || "user-submitted",
+            confidenceScore: normalized.confidenceScore || 0.5,
+            rawMetadata: productData
+        });
+
+        return { saved: true, product: newMasterProduct };
+    } catch (error) {
+        throw error;
     }
-
-    const barcode = productData.barcode.trim();
-
-    // Idempotency check — never overwrite existing entries
-    const existing = await MasterProduct.findOne({ barcode });
-    if (existing) {
-        return { saved: false, product: existing };
-    }
-
-    // Normalize before persisting
-    const normalized = normalizeProduct({
-        name: productData.name || null,
-        brand: productData.brand || null,
-        quantity: productData.quantity || null,
-        category: productData.category || null,
-        image: productData.image || null,
-        source: productData.source || "user-submitted",
-    });
-
-    const master = await MasterProduct.create({ barcode, ...normalized });
-    return { saved: true, product: master };
 };

@@ -8,10 +8,12 @@ export const register = async ({ uid, email, name, emailVerified, picture }) => 
             throw new Error('User already exists');
         }
 
+        const normalizedEmail = email ? email.trim().toLowerCase() : email;
+
         const user = await User.create({
             firebaseUid: uid,
-            email: email,
-            name: name || email.split('@')[0],
+            email: normalizedEmail,
+            name: name || (normalizedEmail ? normalizedEmail.split('@')[0] : 'User'),
             emailVerified: emailVerified || false,
             profilePicture: picture || null
         });
@@ -20,7 +22,7 @@ export const register = async ({ uid, email, name, emailVerified, picture }) => 
     } catch (error) {
         throw error;
     }
-}
+};
 
 // Login an existing user (updates their profile data)
 export const login = async ({ uid, email, name, emailVerified, picture }) => {
@@ -30,6 +32,9 @@ export const login = async ({ uid, email, name, emailVerified, picture }) => {
             throw new Error('User not found');
         }
 
+        if (email) {
+            user.email = email.trim().toLowerCase();
+        }
         user.emailVerified = emailVerified || user.emailVerified;
         user.profilePicture = picture || user.profilePicture;
         user.name = name || user.name;
@@ -39,7 +44,7 @@ export const login = async ({ uid, email, name, emailVerified, picture }) => {
     } catch (error) {
         throw error;
     }
-}
+};
 
 export const getUserByFirebaseUid = async (firebaseUid) => {
     try {
@@ -54,7 +59,7 @@ export const getUserByFirebaseUid = async (firebaseUid) => {
     } catch (error) {
         throw error;
     }
-}
+};
 
 export const formatUserResponse = (user) => {
     return {
@@ -64,13 +69,9 @@ export const formatUserResponse = (user) => {
         email: user.email,
         emailVerified: user.emailVerified,
         profilePicture: user.profilePicture,
-        phone: user.phone || null,
-        preferences: user.preferences || {},
-        preferredLanguage: user.preferredLanguage || 'en',
         createdAt: user.createdAt,
-        updatedAt: user.updatedAt
     };
-}
+};
 
 export const updateUserProfile = async (firebaseUid, { name, phone, preferences, profilePicture, preferredLanguage }) => {
     try {
@@ -96,4 +97,4 @@ export const updateUserProfile = async (firebaseUid, { name, phone, preferences,
     } catch (error) {
         throw error;
     }
-}
+};

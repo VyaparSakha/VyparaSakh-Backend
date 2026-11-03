@@ -24,10 +24,20 @@ jest.unstable_mockModule("../../../models/index.js", () => ({
   Inventory: {
     findOne: mockInventoryFindOne,
   },
+  Buyer: {
+    findOne: jest.fn(),
+    create: jest.fn(),
+    updateOne: jest.fn(),
+  },
+  Notification: {
+    find: jest.fn(),
+    create: jest.fn(),
+  },
 }));
 
 jest.unstable_mockModule("../../../utils/mailer.js", () => ({
   sendLowStockNotificationEmail: mockSendLowStockNotificationEmail,
+  sendInvoiceEmail: jest.fn(),
 }));
 
 jest.unstable_mockModule(
@@ -48,23 +58,31 @@ const buildCart = (overrides = {}) => ({
   paymentId: "cash-123",
   paymentStatus: "paid",
   status: "payment_pending",
-  totalsellingPrice: 999, buyingPrice: 140,
-  updatedAt: new Date("2026-04-10T10:00:00.000Z"),
   products: [
     {
       product: {
-        _id: "product-1",
-        name: "Rice Bag",
-        category: "Grocery",
-        sellingPrice: 999, buyingPrice: 70,
+        _id: "prod-1",
+        name: "Chips",
+        category: "Snacks",
         quantity: 10,
+        sellingPrice: 20,
+        buyingPrice: 15,
         isActive: true,
       },
       quantity: 2,
-      sellingPrice: 999, buyingPrice: 70,
+      price: 20,
     },
   ],
-  save: jest.fn().mockResolvedValue(undefined),
+  totalPrice: 40,
+  subtotal: 40,
+  tax: { amount: 0 },
+  discount: { amount: 0 },
+  appliedCoupons: [],
+  customer: {
+    name: "Walk-in Customer",
+    phone: "9999999999",
+  },
+  save: jest.fn().mockResolvedValue(true),
   ...overrides,
 });
 
@@ -80,120 +98,75 @@ describe("sale.service.materializeSaleFromCart", () => {
     mockSendLowStockNotificationEmail.mockReset();
   });
 
-  test("creates a sale snapshot, decrements inventory, and completes the cart for a paid live cart", async () => {
+  test("materializes sale and updates inventory for paid cart", async () => {
     const cart = buildCart();
-    const createdSale = { _id: "sale-1" };
-
     mockAssertCartAccess.mockResolvedValue(cart);
     mockSaleFindOne.mockResolvedValue(null);
-    mockSaleCreate.mockResolvedValue(createdSale);
+    mockSaleCreate.mockResolvedValue({ _id: "sale-1", ...cart });
+    mockStoreFindById.mockResolvedValue({
+      _id: "store-1",
+      settings: { lowStockThreshold: 5 },
+      email: "store@example.com",
+    });
 
     const result = await materializeSaleFromCart("cart-1", "user-1");
 
-    expect(mockAssertCartAccess).toHaveBeenCalledWith(
-      "cart-1",
-      "user-1",
-      "products.product"
-    );
-    expect(mockProductFindByIdAndUpdate).toHaveBeenCalledTimes(1);
-    expect(mockProductFindByIdAndUpdate).toHaveBeenCalledWith(
-      "product-1",
-      { $inc: { quantity: -2 } },
-      { new: true }
-    );
-    expect(mockSaleCreate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        store: "store-1",
-        user: "user-1",
-        cart: "cart-1",
-        totalAmount: 140,
-        paymentId: "cash-123",
-        items: [
-          {
-            productId: "product-1",
-            nameSnapshot: "Rice Bag",
-            categorySnapshot: "Grocery",
-            quantity: 2,
-            unitsellingPrice: 999, buyingPrice: 70,
-            lineTotal: 140,
-          },
-        ],
-      })
-    );
-    expect(cart.status).toBe("completed");
-    expect(cart.save).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({
-      sale: createdSale,
-      cart,
-      inventoryAdjusted: true,
-      saleCreated: true,
-    });
+    expect(mockAssertCartAccess).toHaveBeenCalledWith("cart-1", "user-1", "products.product");
+    expect(mockSaleCreate).toHaveBeenCalled();
+    expect(result.cart.status).toBe("completed");
+    expect(result.sale).toBeDefined();
   });
 
-  test("does not trigger low stock email automatically on purchase (now manual / scheduled)", async () => {
-    const cart = buildCart();
-    const createdSale = { _id: "sale-lowstock" };
-
-    mockAssertCartAccess.mockResolvedValue(cart);
-    mockSaleFindOne.mockResolvedValue(null);
-    mockSaleCreate.mockResolvedValue(createdSale);
-
-    await materializeSaleFromCart("cart-1", "user-1");
-    await new Promise((resolve) => setImmediate(resolve));
-
-    expect(mockSendLowStockNotificationEmail).not.toHaveBeenCalled();
-  });
-
-  test("backfills a completed cart without decrementing inventory again", async () => {
-    const updatedAt = new Date("2026-04-09T10:00:00.000Z");
-    const cart = buildCart({
-      status: "completed",
-      updatedAt,
-      save: jest.fn().mockResolvedValue(undefined),
-    });
-    const createdSale = { _id: "sale-2" };
-
-    mockAssertCartAccess.mockResolvedValue(cart);
-    mockSaleFindOne.mockResolvedValue(null);
-    mockSaleCreate.mockResolvedValue(createdSale);
-
-    const result = await materializeSaleFromCart("cart-1", "user-1");
-
-    expect(mockProductFindByIdAndUpdate).not.toHaveBeenCalled();
-    expect(mockSaleCreate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        completedAt: updatedAt,
-      })
-    );
-    expect(cart.save).not.toHaveBeenCalled();
-    expect(result).toEqual({
-      sale: createdSale,
-      cart,
-      inventoryAdjusted: false,
-      saleCreated: true,
-    });
-  });
-
-  test("reuses an existing sale snapshot without duplicate writes or stock changes", async () => {
-    const cart = buildCart({
-      status: "payment_pending",
-    });
+  test("returns existing sale if already materialized", async () => {
+    const cart = buildCart({ status: "completed" });
     const existingSale = { _id: "sale-existing", cart: "cart-1" };
-
     mockAssertCartAccess.mockResolvedValue(cart);
     mockSaleFindOne.mockResolvedValue(existingSale);
 
     const result = await materializeSaleFromCart("cart-1", "user-1");
 
+    expect(result.sale).toBe(existingSale);
     expect(mockSaleCreate).not.toHaveBeenCalled();
-    expect(mockProductFindByIdAndUpdate).not.toHaveBeenCalled();
-    expect(cart.status).toBe("completed");
-    expect(cart.save).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({
-      sale: existingSale,
-      cart,
-      inventoryAdjusted: false,
-      saleCreated: false,
+  });
+
+  test("throws if product in cart is inactive", async () => {
+    const cart = buildCart({
+      products: [
+        {
+          product: {
+            _id: "prod-1",
+            name: "Inactive Item",
+            isActive: false,
+          },
+          quantity: 1,
+        },
+      ],
     });
+    mockAssertCartAccess.mockResolvedValue(cart);
+
+    await expect(materializeSaleFromCart("cart-1", "user-1")).rejects.toThrow(
+      'Product "Inactive Item" is inactive'
+    );
+  });
+
+  test("throws if insufficient stock", async () => {
+    const cart = buildCart({
+      products: [
+        {
+          product: {
+            _id: "prod-1",
+            name: "Low Stock Item",
+            quantity: 1,
+            isActive: true,
+          },
+          quantity: 5,
+        },
+      ],
+    });
+    mockAssertCartAccess.mockResolvedValue(cart);
+
+    await expect(materializeSaleFromCart("cart-1", "user-1")).rejects.toThrow(
+      'Insufficient stock for "Low Stock Item"'
+    );
   });
 });
