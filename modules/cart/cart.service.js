@@ -261,11 +261,13 @@ export const quickCheckout = async (userId, checkoutData) => {
       );
     }
 
-    const price = Number(product.sellingPrice ?? product.price ?? item.price ?? 0);
+    const price = Number(item.price ?? product.sellingPrice ?? product.price ?? 0);
     cartProducts.push({
       product: product._id,
       quantity: qty,
       price,
+      batchId: item.batchId || null,
+      batchNumber: item.batchNumber || null,
     });
     calculatedSubtotal += price * qty;
   }

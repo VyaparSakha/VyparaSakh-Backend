@@ -27,6 +27,8 @@ const buildSaleItems = (cart) =>
       unitPrice,
       unitBuyingPrice,
       lineTotal: unitPrice * quantity,
+      batchId: item.batchId || null,
+      batchNumberSnapshot: item.batchNumber || null,
     };
   });
 
@@ -54,6 +56,18 @@ const decrementInventory = async (cart) => {
   for (const item of cart.products) {
     const productId = item.product?._id || item.product;
     const qtyToSubtract = Number(item.quantity || 0);
+
+    // Decrement from specific batch or earliest-expiry batches (FEFO)
+    try {
+      await decrementBatchStock(
+        productId,
+        cart.store,
+        qtyToSubtract,
+        item.batchId || item.batch?._id || null
+      );
+    } catch (batchErr) {
+      console.warn("[SALE SERVICE] Could not decrement batch stock:", batchErr.message);
+    }
 
     let updatedProd = null;
     if (Product && typeof Product.findByIdAndUpdate === "function") {

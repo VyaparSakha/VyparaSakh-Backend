@@ -8,10 +8,22 @@ import {
 } from "./batch.service.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 
+const cleanStoreId = (s) => {
+  if (!s) return "";
+  if (typeof s === "object") {
+    const extracted = s._id || s.id || "";
+    return typeof extracted === "string" ? extracted.trim() : "";
+  }
+  const str = String(s).trim();
+  if (str === "undefined" || str === "null" || str === "[object Object]") return "";
+  return str;
+};
+
 // POST /batches — Create a new batch for an existing product
 export const createBatchController = async (req, res) => {
   try {
-    const storeId = req.body?.storeId || req.query?.storeId || req.headers?.["x-store-id"];
+    const rawStore = req.body?.storeId || req.query?.storeId || req.headers?.["x-store-id"];
+    const storeId = cleanStoreId(rawStore);
     const userId = req.user?._id;
     const { productId, ...batchData } = req.body;
 
@@ -36,9 +48,10 @@ export const createBatchController = async (req, res) => {
 // PATCH /batches/:id/stock — Add stock to an existing batch
 export const addStockController = async (req, res) => {
   try {
-    const storeId = req.body?.storeId || req.query?.storeId || req.headers?.["x-store-id"];
+    const rawStore = req.body?.storeId || req.query?.storeId || req.headers?.["x-store-id"];
+    const storeId = cleanStoreId(rawStore);
     const userId = req.user?._id;
-    const { additionalQty } = req.body;
+    const additionalQty = req.body?.additionalQty ?? req.body?.quantity;
 
     const batch = await addStockToBatch(
       req.params.id,
@@ -60,7 +73,8 @@ export const addStockController = async (req, res) => {
 // GET /batches/product/:productId — Get active batches for a product
 export const getActiveBatchesController = async (req, res) => {
   try {
-    const storeId = req.query?.storeId || req.headers?.["x-store-id"];
+    const rawStore = req.query?.storeId || req.headers?.["x-store-id"];
+    const storeId = cleanStoreId(rawStore);
     const { productId } = req.params;
     const includeArchived = req.query?.includeArchived === "true";
 
@@ -81,7 +95,8 @@ export const getActiveBatchesController = async (req, res) => {
 // PATCH /batches/:id/archive — Archive a batch manually
 export const archiveBatchController = async (req, res) => {
   try {
-    const storeId = req.query?.storeId || req.headers?.["x-store-id"];
+    const rawStore = req.query?.storeId || req.headers?.["x-store-id"];
+    const storeId = cleanStoreId(rawStore);
     const batch = await archiveBatch(req.params.id, storeId);
     res
       .status(200)

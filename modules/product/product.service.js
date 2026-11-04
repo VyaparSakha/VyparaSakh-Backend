@@ -319,10 +319,23 @@ export const getProductByBarcode = async (barcode, storeId) => {
 
         if (!product) return null;
 
-        const batches = await Batch.find({
-            store: storeId,
+        let batches = await Batch.find({
             productId: product._id
         }).sort({ isArchived: 1, expiryDate: 1 }).lean();
+
+        if (batches.length === 0) {
+            batches = [{
+                _id: product._id,
+                productId: product._id,
+                store: product.store,
+                batchNumber: product.batchNumber || "BATCH-001",
+                expiryDate: product.expDate || null,
+                quantity: product.quantity || 0,
+                buyingPrice: product.buyingPrice || 0,
+                sellingPrice: product.sellingPrice || 0,
+                isArchived: false,
+            }];
+        }
 
         const activeBatch = batches.find(b => !b.isArchived) || batches[0];
         return {
@@ -361,7 +374,6 @@ export const searchProductsInStore = async (query, storeId) => {
 
         const productIds = products.map(p => p._id);
         const batches = await Batch.find({
-            store: storeId,
             productId: { $in: productIds }
         }).sort({ isArchived: 1, expiryDate: 1 }).lean();
 
@@ -374,6 +386,19 @@ export const searchProductsInStore = async (query, storeId) => {
 
         return products.map(prod => {
             const prodBatches = batchMap[prod._id.toString()] || [];
+            if (prodBatches.length === 0) {
+                prodBatches.push({
+                    _id: prod._id,
+                    productId: prod._id,
+                    store: prod.store,
+                    batchNumber: prod.batchNumber || "BATCH-001",
+                    expiryDate: prod.expDate || null,
+                    quantity: prod.quantity || 0,
+                    buyingPrice: prod.buyingPrice || 0,
+                    sellingPrice: prod.sellingPrice || 0,
+                    isArchived: false,
+                });
+            }
             const activeBatch = prodBatches.find(b => !b.isArchived) || prodBatches[0];
             return {
                 ...prod,

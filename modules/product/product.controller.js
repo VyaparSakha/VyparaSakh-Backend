@@ -3,11 +3,23 @@ import { resolveBarcode } from "./resolver.service.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 import { uploadBufferToCloudinary } from "../../utils/cloudinary.js";
 
+const cleanStoreId = (s) => {
+  if (!s) return "";
+  if (typeof s === "object") {
+    const extracted = s._id || s.id || "";
+    return typeof extracted === "string" ? extracted.trim() : "";
+  }
+  const str = String(s).trim();
+  if (str === "undefined" || str === "null" || str === "[object Object]") return "";
+  return str;
+};
+
 // Search products controller
 export const searchProductsController = async (req, res) => {
     try {
         const query = req.query?.query;
-        const storeId = req.query?.storeId;
+        const rawStore = req.query?.storeId || req.headers?.["x-store-id"];
+        const storeId = cleanStoreId(rawStore);
         const products = await searchProductsInStore(query, storeId);
         res.status(200).json(new ApiResponse(products, "Products searched successfully", 200));
     } catch (error) {
@@ -18,9 +30,10 @@ export const searchProductsController = async (req, res) => {
 //create product controller
 export const addProductController = async (req, res) => {
     try {
+        const rawStore = req.body?.storeId || req.body?.store || req.headers?.["x-store-id"];
         const productData = {
             ...req.body,
-            store: req.body?.storeId || req.body?.store,
+            store: cleanStoreId(rawStore),
             createdBy: req.user?._id
         };
 
@@ -73,7 +86,8 @@ export const deleteProductController = async (req, res) => {
 //get all products controller
 export const getAllProductsController = async (req, res) => {
     try {
-        const storeId = req.query?.storeId;
+        const rawStore = req.query?.storeId || req.headers?.["x-store-id"];
+        const storeId = cleanStoreId(rawStore);
         const products = await getAllProducts(storeId);
         res.status(200).json(new ApiResponse(products, "Products fetched successfully", 200));
     } catch (error) {
@@ -113,7 +127,8 @@ export const resolveProduct = async (req, res) => {
 export const getProductByBarcodeController = async (req, res) => {
     try {
         const { barcode } = req.params;
-        const storeId = req.query?.storeId || req.headers?.["x-store-id"];
+        const rawStore = req.query?.storeId || req.headers?.["x-store-id"];
+        const storeId = cleanStoreId(rawStore);
 
         const product = await getProductByBarcode(barcode, storeId);
 

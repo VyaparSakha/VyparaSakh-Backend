@@ -46,6 +46,16 @@ const cartSchema = new mongoose.Schema({
             price: {
                 type: Number,
                 required: true
+            },
+            batchId: {
+                type: mongoose.Schema.Types.ObjectId,
+                ref: 'Batch',
+                default: null
+            },
+            batchNumber: {
+                type: String,
+                trim: true,
+                default: null
             }
         }
     ],

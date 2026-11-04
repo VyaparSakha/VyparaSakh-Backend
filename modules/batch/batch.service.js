@@ -16,14 +16,12 @@ export const generateBatchNumber = async (productId) => {
  * This keeps the denormalized cache accurate for existing code (billing, low-stock, analytics).
  */
 export const syncProductQuantity = async (productId, storeId = null) => {
-  const query = {
+  // All batches for this productId belong to this product.
+  // Finding by productId directly avoids any store string vs ObjectId type mismatch.
+  const activeBatches = await Batch.find({
     productId,
     isArchived: false,
-  };
-  if (storeId && storeId !== "undefined" && storeId !== "null") {
-    query.store = storeId;
-  }
-  const activeBatches = await Batch.find(query);
+  });
   const totalQty = activeBatches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
 
   await Product.findByIdAndUpdate(productId, { quantity: totalQty });
@@ -31,7 +29,7 @@ export const syncProductQuantity = async (productId, storeId = null) => {
   // Also sync Inventory record if it exists
   try {
     const invQuery = { product: productId };
-    if (storeId && storeId !== "undefined" && storeId !== "null") {
+    if (storeId && storeId !== "undefined" && storeId !== "null" && typeof storeId === "string") {
       invQuery.store = storeId;
     }
     const inv = await Inventory.findOne(invQuery);

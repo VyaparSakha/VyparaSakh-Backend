@@ -214,9 +214,11 @@ export const getPricingController = async (req, res) => {
 export const internalCheckBalanceController = async (req, res) => {
   try {
     const { ownerId, storeId, userId } = req.body;
+    console.log("[AI BILLING] Internal check-balance request:", { ownerId, storeId, userId });
     const result = await aiBillingService.checkBalance({ ownerId, storeId, userId });
     res.status(200).json(new ApiResponse(result, "Balance checked successfully", 200));
   } catch (error) {
+    console.error("[AI BILLING] Internal check-balance error:", error.message);
     res
       .status(error.statusCode || 400)
       .json(new ApiResponse(null, error.message || "Balance check failed", error.statusCode || 400));

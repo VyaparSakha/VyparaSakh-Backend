@@ -42,10 +42,12 @@ const saleItemSchema = new mongoose.Schema(
       ref: "Batch",
       default: null,
     },
+    profitSnapshot: {},
     batchNumberSnapshot: {
       type: String,
       default: null,
-    
+    },
+    profitSnapshot: {
       type: Number,
       required: true,
       min: 0,

@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import mongoose from "mongoose";
+import User from "../../models/user.model.js";
 import Store from "../../models/store.model.js";
 import AiWallet, { getCalendarMonthPeriod } from "../../models/aiWallet.model.js";
 import AiCreditTransaction from "../../models/aiCreditTransaction.model.js";
@@ -12,15 +13,69 @@ export const DEFAULT_MONTHLY_LIMIT = 5000; // Monthly usage cap for safety
 export const DEFAULT_RESERVATION_TTL_MS = 5 * 60 * 1000; // 5 minutes TTL
 
 /**
- * Normalizes an ID to an ObjectId or null
+ * Normalizes an ID to an ObjectId or null.
+ * Returns null if the value is not a valid 24-hex string or ObjectId instance.
  */
-const toObjectId = (id) => {
+export const toObjectId = (id) => {
   if (!id) return null;
   if (id instanceof mongoose.Types.ObjectId) return id;
-  if (typeof id === "string" && mongoose.Types.ObjectId.isValid(id)) {
-    return new mongoose.Types.ObjectId(id);
+  if (id && id._bsontype === "ObjectID") return id;
+  const str = typeof id === "string" ? id : (typeof id?.toString === "function" ? id.toString() : "");
+  if (/^[0-9a-fA-F]{24}$/.test(str)) {
+    return new mongoose.Types.ObjectId(str);
   }
-  return id;
+  return null;
+};
+
+/**
+ * Resolves the billable store owner's User ObjectId.
+ * Supports:
+ * - ownerId: ObjectId or 24-hex string
+ * - storeId: ObjectId or 24-hex string -> queries Store model using store.owner
+ * - userId: ObjectId, 24-hex string, or Firebase UID string -> queries User model
+ */
+export const resolveBillableOwnerId = async ({
+  ownerId = null,
+  storeId = null,
+  userId = null,
+} = {}) => {
+  let resolvedOwnerId = toObjectId(ownerId);
+  if (resolvedOwnerId) return resolvedOwnerId;
+
+  // 1. Try store lookup (Store model schema has `owner` referencing User)
+  const normStoreId = toObjectId(storeId);
+  if (normStoreId) {
+    try {
+      const store = await Store.findById(normStoreId).select("owner ownerFirebaseUid");
+      if (store) {
+        const storeOwner = toObjectId(store.owner);
+        if (storeOwner) return storeOwner;
+      }
+    } catch (err) {
+      console.warn("[AI BILLING] Store owner resolution failed:", err.message);
+    }
+  }
+
+  // 2. Try user lookup (handles Mongo _id or firebaseUid)
+  if (userId) {
+    try {
+      let user = null;
+      const normUserId = toObjectId(userId);
+      if (normUserId) {
+        user = await User.findById(normUserId).select("_id ownerId firebaseUid");
+      }
+      if (!user && typeof userId === "string") {
+        user = await User.findOne({ firebaseUid: userId.trim() }).select("_id ownerId firebaseUid");
+      }
+      if (user && user._id) {
+        return toObjectId(user.ownerId || user._id);
+      }
+    } catch (err) {
+      console.warn("[AI BILLING] User owner resolution failed:", err.message);
+    }
+  }
+
+  return null;
 };
 
 /**
@@ -124,25 +179,10 @@ export const checkBalance = async ({
   storeId = null,
   userId = null,
 } = {}) => {
-  let resolvedOwnerId = toObjectId(ownerId);
-
-  if (!resolvedOwnerId && storeId) {
-    const store = await Store.findById(toObjectId(storeId)).select("ownerId");
-    if (store?.ownerId) {
-      resolvedOwnerId = store.ownerId;
-    }
-  }
-
-  if (!resolvedOwnerId && userId) {
-    const User = mongoose.model("User");
-    const user = await User.findById(toObjectId(userId)).select("ownerId role");
-    if (user) {
-      resolvedOwnerId = user.ownerId || user._id;
-    }
-  }
+  const resolvedOwnerId = await resolveBillableOwnerId({ ownerId, storeId, userId });
 
   if (!resolvedOwnerId) {
-    throw new Error("Unable to resolve ownerId for AI balance check");
+    throw new Error("Unable to resolve store owner account for AI balance check");
   }
 
   const wallet = await getOrCreateWallet(resolvedOwnerId);
@@ -816,16 +856,12 @@ export const recordUsageAndSettle = async ({
   const existingUsage = await AiUsageRecord.findOne({ executionId: safeExecutionId });
 
   // Resolve billable owner
-  let resolvedOwnerId = toObjectId(metadata?.ownerId || metadata?.billableOwnerId);
-  if (!resolvedOwnerId && storeId) {
-    const store = await Store.findById(toObjectId(storeId)).select("ownerId");
-    if (store?.ownerId) resolvedOwnerId = store.ownerId;
-  }
-  if (!resolvedOwnerId && userId) {
-    const User = mongoose.model("User");
-    const user = await User.findById(toObjectId(userId)).select("ownerId");
-    if (user) resolvedOwnerId = user.ownerId || user._id;
-  }
+  let resolvedOwnerId = await resolveBillableOwnerId({
+    ownerId: metadata?.ownerId || metadata?.billableOwnerId,
+    storeId,
+    userId,
+  });
+
   if (!resolvedOwnerId && existingUsage) {
     resolvedOwnerId = existingUsage.ownerId;
   }
