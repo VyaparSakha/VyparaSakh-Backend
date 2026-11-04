@@ -110,6 +110,69 @@ export const getOrCreateWallet = async (ownerId) => {
 };
 
 /**
+ * Check AI Credit Balance & Eligibility
+ * Fast pre-flight check without reserving or modifying balances.
+ *
+ * @param {Object} params
+ * @param {string|mongoose.Types.ObjectId} [params.ownerId]
+ * @param {string|mongoose.Types.ObjectId} [params.storeId]
+ * @param {string|mongoose.Types.ObjectId} [params.userId]
+ * @returns {Promise<{ allowed: boolean, balance: number, monthlyUsed: number, monthlyLimit: number, monthlyRemaining: number, status: string, reason: string|null }>}
+ */
+export const checkBalance = async ({
+  ownerId = null,
+  storeId = null,
+  userId = null,
+} = {}) => {
+  let resolvedOwnerId = toObjectId(ownerId);
+
+  if (!resolvedOwnerId && storeId) {
+    const store = await Store.findById(toObjectId(storeId)).select("ownerId");
+    if (store?.ownerId) {
+      resolvedOwnerId = store.ownerId;
+    }
+  }
+
+  if (!resolvedOwnerId && userId) {
+    const User = mongoose.model("User");
+    const user = await User.findById(toObjectId(userId)).select("ownerId role");
+    if (user) {
+      resolvedOwnerId = user.ownerId || user._id;
+    }
+  }
+
+  if (!resolvedOwnerId) {
+    throw new Error("Unable to resolve ownerId for AI balance check");
+  }
+
+  const wallet = await getOrCreateWallet(resolvedOwnerId);
+
+  let allowed = true;
+  let reason = null;
+
+  if (wallet.status !== "active") {
+    allowed = false;
+    reason = "WALLET_INACTIVE";
+  } else if (wallet.balance <= 0) {
+    allowed = false;
+    reason = "INSUFFICIENT_CREDITS";
+  } else if (wallet.monthlyUsed >= wallet.monthlyLimit) {
+    allowed = false;
+    reason = "MONTHLY_LIMIT_EXCEEDED";
+  }
+
+  return {
+    allowed,
+    balance: wallet.balance,
+    monthlyUsed: wallet.monthlyUsed,
+    monthlyLimit: wallet.monthlyLimit,
+    monthlyRemaining: Math.max(0, wallet.monthlyLimit - wallet.monthlyUsed),
+    status: wallet.status,
+    reason,
+  };
+};
+
+/**
  * 1.5.B Reserve Credits
  *
  * Atomically reserves credits on the owner's wallet prior to AI execution.
@@ -648,96 +711,293 @@ export const recordUsageAndSettle = async ({
     throw new Error("Valid executionId is required to record usage and settle");
   }
 
-  const reservation = await AiCreditReservation.findOne({ executionId: executionId.trim() });
-  if (!reservation) {
-    throw new Error(`Active credit reservation not found for executionId: ${executionId}`);
-  }
+  const safeExecutionId = executionId.trim();
+  const reservation = await AiCreditReservation.findOne({ executionId: safeExecutionId });
 
-  // Idempotency: Return existing usage record if already settled
-  if (reservation.status === "settled") {
-    const existingUsage = await AiUsageRecord.findOne({ executionId: executionId.trim() });
-    const wallet = await AiWallet.findById(reservation.walletId);
+  // 1. If reservation exists, settle reservation (backward-compatible with existing tests & flow)
+  if (reservation) {
+    if (reservation.status === "settled") {
+      const existingUsage = await AiUsageRecord.findOne({ executionId: safeExecutionId });
+      const wallet = await AiWallet.findById(reservation.walletId);
+      return {
+        usageRecord: existingUsage,
+        reservation,
+        wallet,
+        alreadySettled: true,
+        creditsCharged: reservation.consumedCredits || 0,
+        remainingBalance: wallet ? wallet.balance : 0,
+        isExhausted: wallet ? wallet.balance <= 0 || wallet.monthlyUsed >= wallet.monthlyLimit : false,
+      };
+    }
+
+    // Authoritative credit calculation on Express using configured rates
+    const pricingConfig = await resolvePricingConfig({
+      featureName: feature,
+      provider,
+      model,
+    });
+
+    const totalCalls = Array.isArray(modelBreakdown)
+      ? modelBreakdown.reduce((sum, b) => sum + (Number(b.callCount) || 1), 0)
+      : 0;
+
+    const { credits, tokenCredits, audioCredits, voiceCredits } = calculateCredits({
+      inputTokens,
+      outputTokens,
+      audioInputUnits,
+      audioOutputUnits,
+      voiceDurationSeconds,
+      callCount: totalCalls,
+      config: pricingConfig,
+    });
+
+    // Perform atomic settlement on the customer's wallet
+    const settlementResult = await settleCredits({
+      executionId: safeExecutionId,
+      actualCredits: credits,
+      idempotencyKey: `settle_usage_${safeExecutionId}`,
+      metadata: {
+        ...metadata,
+        feature,
+        provider,
+        model,
+        inputTokens,
+        outputTokens,
+        tokenCredits,
+        audioCredits,
+        voiceCredits,
+        pricingVersion: pricingConfig.pricingVersion || 1,
+      },
+    });
+
+    // Store audited usage record
+    const usageRecord = await AiUsageRecord.findOneAndUpdate(
+      { executionId: safeExecutionId },
+      {
+        $setOnInsert: {
+          ownerId: reservation.ownerId,
+          userId: toObjectId(userId) || reservation.ownerId,
+          storeId: toObjectId(storeId) || reservation.storeId,
+          executionId: safeExecutionId,
+          feature,
+          provider,
+          model,
+          modelBreakdown: Array.isArray(modelBreakdown) ? modelBreakdown : [],
+          inputTokens: Math.max(0, Number(inputTokens) || 0),
+          outputTokens: Math.max(0, Number(outputTokens) || 0),
+          totalTokens: Math.max(0, Number(inputTokens) || 0) + Math.max(0, Number(outputTokens) || 0),
+          audioInputUnits: Math.max(0, Number(audioInputUnits) || 0),
+          audioOutputUnits: Math.max(0, Number(audioOutputUnits) || 0),
+          creditsCharged: settlementResult.reservation.consumedCredits,
+          pricingVersion: pricingConfig.pricingVersion || 1,
+          executionStatus: executionStatus || "completed",
+          metadata,
+          settledAt: new Date(),
+        },
+      },
+      { upsert: true, new: true }
+    );
+
+    const isExhausted =
+      settlementResult.wallet.balance <= 0 ||
+      settlementResult.wallet.monthlyUsed >= settlementResult.wallet.monthlyLimit;
+
     return {
-      usageRecord: existingUsage,
-      reservation,
-      wallet,
-      alreadySettled: true,
+      usageRecord,
+      reservation: settlementResult.reservation,
+      wallet: settlementResult.wallet,
+      creditsCharged: settlementResult.reservation.consumedCredits,
+      remainingBalance: settlementResult.wallet.balance,
+      isExhausted,
     };
   }
 
-  // Authoritative credit calculation on Express using configured rates
+  // 2. Direct Stage Deduction / Non-reserved settlement
+  const existingUsage = await AiUsageRecord.findOne({ executionId: safeExecutionId });
+
+  // Resolve billable owner
+  let resolvedOwnerId = toObjectId(metadata?.ownerId || metadata?.billableOwnerId);
+  if (!resolvedOwnerId && storeId) {
+    const store = await Store.findById(toObjectId(storeId)).select("ownerId");
+    if (store?.ownerId) resolvedOwnerId = store.ownerId;
+  }
+  if (!resolvedOwnerId && userId) {
+    const User = mongoose.model("User");
+    const user = await User.findById(toObjectId(userId)).select("ownerId");
+    if (user) resolvedOwnerId = user.ownerId || user._id;
+  }
+  if (!resolvedOwnerId && existingUsage) {
+    resolvedOwnerId = existingUsage.ownerId;
+  }
+
+  if (!resolvedOwnerId) {
+    throw new Error(`Active credit reservation not found and cannot resolve owner for executionId: ${executionId}`);
+  }
+
+  const wallet = await getOrCreateWallet(resolvedOwnerId);
+
   const pricingConfig = await resolvePricingConfig({
     featureName: feature,
     provider,
     model,
   });
 
+  const isStageDeduction = Boolean(metadata?.isStageDeduction);
+  let billableInputTokens = Math.max(0, Number(inputTokens) || 0);
+  let billableOutputTokens = Math.max(0, Number(outputTokens) || 0);
+  let billableAudioIn = Math.max(0, Number(audioInputUnits) || 0);
+  let billableAudioOut = Math.max(0, Number(audioOutputUnits) || 0);
+
+  // If cumulative summary was reported at completion without isStageDeduction flag, compute delta from existing
+  if (!isStageDeduction && existingUsage) {
+    billableInputTokens = Math.max(0, billableInputTokens - (existingUsage.inputTokens || 0));
+    billableOutputTokens = Math.max(0, billableOutputTokens - (existingUsage.outputTokens || 0));
+    billableAudioIn = Math.max(0, billableAudioIn - (existingUsage.audioInputUnits || 0));
+    billableAudioOut = Math.max(0, billableAudioOut - (existingUsage.audioOutputUnits || 0));
+  }
+
   const totalCalls = Array.isArray(modelBreakdown)
     ? modelBreakdown.reduce((sum, b) => sum + (Number(b.callCount) || 1), 0)
     : 0;
 
+  // If zero delta tokens/audio and record exists, simply update execution status
+  if (
+    billableInputTokens === 0 &&
+    billableOutputTokens === 0 &&
+    billableAudioIn === 0 &&
+    billableAudioOut === 0 &&
+    totalCalls === 0
+  ) {
+    if (existingUsage) {
+      existingUsage.executionStatus = executionStatus || existingUsage.executionStatus;
+      await existingUsage.save();
+      return {
+        usageRecord: existingUsage,
+        wallet,
+        creditsCharged: 0,
+        remainingBalance: wallet.balance,
+        isExhausted: wallet.balance <= 0 || wallet.monthlyUsed >= wallet.monthlyLimit,
+      };
+    }
+  }
+
   const { credits, tokenCredits, audioCredits, voiceCredits } = calculateCredits({
-    inputTokens,
-    outputTokens,
-    audioInputUnits,
-    audioOutputUnits,
+    inputTokens: billableInputTokens,
+    outputTokens: billableOutputTokens,
+    audioInputUnits: billableAudioIn,
+    audioOutputUnits: billableAudioOut,
     voiceDurationSeconds,
     callCount: totalCalls,
     config: pricingConfig,
   });
 
-  // Perform atomic settlement on the customer's wallet
-  const settlementResult = await settleCredits({
-    executionId: executionId.trim(),
-    actualCredits: credits,
-    idempotencyKey: `settle_usage_${executionId.trim()}`,
-    metadata: {
-      ...metadata,
-      feature,
-      provider,
-      model,
-      inputTokens,
-      outputTokens,
-      tokenCredits,
-      audioCredits,
-      voiceCredits,
-      pricingVersion: pricingConfig.pricingVersion || 1,
-    },
-  });
+  const maxCap = pricingConfig.maxExecutionCharge || 250;
+  const billedCredits = Math.min(credits, maxCap);
 
-  // Store audited usage record
+  // Deduct from wallet balance safely (clamp to balance so it doesn't violate min: 0 schema validator)
+  const deduction = Math.max(0, Math.min(wallet.balance, billedCredits));
+  let updatedWallet = await AiWallet.findOneAndUpdate(
+    { _id: wallet._id, balance: { $gte: deduction } },
+    {
+      $inc: {
+        balance: -deduction,
+        monthlyUsed: deduction,
+      },
+    },
+    { new: true }
+  );
+
+  if (!updatedWallet) {
+    const fresh = await AiWallet.findById(wallet._id);
+    const freshDeduction = Math.max(0, Math.min(fresh ? fresh.balance : 0, billedCredits));
+    updatedWallet = await AiWallet.findByIdAndUpdate(
+      wallet._id,
+      {
+        $inc: {
+          balance: -freshDeduction,
+          monthlyUsed: freshDeduction,
+        },
+      },
+      { new: true }
+    );
+  }
+
+  // Create immutable transaction ledger record if credits were billed
+  const stageName = metadata?.stageName || `stage_${Date.now()}`;
+  const txIdempotencyKey = `stage_${safeExecutionId}_${stageName}`;
+
+  if (billedCredits > 0) {
+    try {
+      await AiCreditTransaction.create({
+        ownerId: resolvedOwnerId,
+        walletId: updatedWallet._id,
+        storeId: toObjectId(storeId),
+        executionId: safeExecutionId,
+        type: "usage_charge",
+        amount: billedCredits,
+        balanceAfter: updatedWallet.balance,
+        idempotencyKey: txIdempotencyKey,
+        description: `Deducted ${billedCredits} credits for ${feature} execution ${safeExecutionId} (${stageName})`,
+        metadata: {
+          ...metadata,
+          feature,
+          provider,
+          model,
+          inputTokens: billableInputTokens,
+          outputTokens: billableOutputTokens,
+          tokenCredits,
+          audioCredits,
+          voiceCredits,
+          pricingVersion: pricingConfig.pricingVersion || 1,
+        },
+      });
+    } catch (txErr) {
+      console.warn("[AI BILLING] Stage transaction ledger write note:", txErr.message);
+    }
+  }
+
+  // Upsert AiUsageRecord
   const usageRecord = await AiUsageRecord.findOneAndUpdate(
-    { executionId: executionId.trim() },
+    { executionId: safeExecutionId },
     {
       $setOnInsert: {
-        ownerId: reservation.ownerId,
-        userId: toObjectId(userId) || reservation.ownerId,
-        storeId: toObjectId(storeId) || reservation.storeId,
-        executionId: executionId.trim(),
+        ownerId: resolvedOwnerId,
+        userId: toObjectId(userId) || resolvedOwnerId,
+        storeId: toObjectId(storeId),
+        executionId: safeExecutionId,
         feature,
         provider,
         model,
-        modelBreakdown: Array.isArray(modelBreakdown) ? modelBreakdown : [],
-        inputTokens: Math.max(0, Number(inputTokens) || 0),
-        outputTokens: Math.max(0, Number(outputTokens) || 0),
-        totalTokens: Math.max(0, Number(inputTokens) || 0) + Math.max(0, Number(outputTokens) || 0),
-        audioInputUnits: Math.max(0, Number(audioInputUnits) || 0),
-        audioOutputUnits: Math.max(0, Number(audioOutputUnits) || 0),
-        creditsCharged: settlementResult.reservation.consumedCredits,
         pricingVersion: pricingConfig.pricingVersion || 1,
-        executionStatus: executionStatus || "completed",
-        metadata,
         settledAt: new Date(),
+      },
+      $set: {
+        executionStatus: executionStatus || "completed",
+        updatedAt: new Date(),
+        metadata,
+      },
+      $inc: {
+        inputTokens: billableInputTokens,
+        outputTokens: billableOutputTokens,
+        totalTokens: billableInputTokens + billableOutputTokens,
+        audioInputUnits: billableAudioIn,
+        audioOutputUnits: billableAudioOut,
+        creditsCharged: billedCredits,
       },
     },
     { upsert: true, new: true }
   );
 
+  const isExhausted =
+    updatedWallet.balance <= 0 ||
+    updatedWallet.monthlyUsed >= updatedWallet.monthlyLimit;
+
   return {
     usageRecord,
-    reservation: settlementResult.reservation,
-    wallet: settlementResult.wallet,
-    creditsCharged: settlementResult.reservation.consumedCredits,
+    wallet: updatedWallet,
+    creditsCharged: billedCredits,
+    remainingBalance: updatedWallet.balance,
+    isExhausted,
   };
 };
 

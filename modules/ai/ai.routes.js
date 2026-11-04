@@ -145,47 +145,40 @@ const resolveAiStoreContext = async (req, res, next) => {
         req.body?.execution_id ||
         null;
 
-      let isExistingActiveReservation = false;
-      if (executionId) {
-        const existingRes = await AiCreditReservation.findOne({
-          executionId: executionId.toString().trim(),
-          status: "active",
-        });
-        if (existingRes) {
-          isExistingActiveReservation = true;
-        }
+      if (!executionId) {
+        executionId = `exec_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
       }
 
-      // If no active reservation exists (new message or new execution), reserve budget
-      if (!isExistingActiveReservation) {
-        if (!executionId) {
-          executionId = `exec_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-        }
+      // Pre-flight balance gate check (Direct stage-deduction model: no rigid 25-credit buffer required)
+      const wallet = await aiBillingService.getOrCreateWallet(billableOwner._id);
+      if (wallet.status !== "active") {
+        return res.status(403).json({
+          success: false,
+          code: "WALLET_INACTIVE",
+          message: "AI credit wallet is inactive. Please contact support.",
+          statusCode: 403,
+        });
+      }
 
-        try {
-          await aiBillingService.reserveCredits({
-            ownerId: billableOwner._id,
-            storeId: currentStoreId,
-            executionId,
-            credits: 25, // Standard reservation buffer (unspent credits will be released)
-            featureName: "copilot",
-            metadata: {
-              userId: currentUserId,
-              membershipType: authContext.membershipType,
-            },
-          });
-        } catch (resErr) {
-          console.warn("[AI BILLING] Credit reservation failed:", resErr.message);
-          const quotaMessage = authContext.isOwner
-            ? resErr.message || "Insufficient AI credits. Please upgrade or top up your wallet in Settings."
-            : "Store owner's account has insufficient AI credits or has reached its monthly usage limit.";
-          return res.status(402).json({
-            success: false,
-            code: "INSUFFICIENT_CREDITS",
-            message: quotaMessage,
-            statusCode: 402,
-          });
-        }
+      if (wallet.balance <= 0) {
+        const quotaMessage = authContext.isOwner
+          ? "You have 0 AI credits remaining. Please recharge your wallet in Settings."
+          : "Store owner's account has 0 AI credits remaining. Please contact the store owner.";
+        return res.status(402).json({
+          success: false,
+          code: "INSUFFICIENT_CREDITS",
+          message: quotaMessage,
+          statusCode: 402,
+        });
+      }
+
+      if (wallet.monthlyUsed >= wallet.monthlyLimit) {
+        return res.status(402).json({
+          success: false,
+          code: "MONTHLY_LIMIT_EXCEEDED",
+          message: "Monthly AI usage limit reached. Please recharge or upgrade your plan in Settings.",
+          statusCode: 402,
+        });
       }
     }
 

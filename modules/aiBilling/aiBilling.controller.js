@@ -208,6 +208,22 @@ export const getPricingController = async (req, res) => {
  */
 
 /**
+ * POST /api/ai-billing/internal/check-balance
+ * Fast pre-flight check without reserving or modifying balances.
+ */
+export const internalCheckBalanceController = async (req, res) => {
+  try {
+    const { ownerId, storeId, userId } = req.body;
+    const result = await aiBillingService.checkBalance({ ownerId, storeId, userId });
+    res.status(200).json(new ApiResponse(result, "Balance checked successfully", 200));
+  } catch (error) {
+    res
+      .status(error.statusCode || 400)
+      .json(new ApiResponse(null, error.message || "Balance check failed", error.statusCode || 400));
+  }
+};
+
+/**
  * POST /api/ai-billing/internal/reserve
  */
 export const internalReserveController = async (req, res) => {

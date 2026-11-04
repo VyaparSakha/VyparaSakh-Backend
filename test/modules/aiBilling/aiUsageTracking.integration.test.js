@@ -283,4 +283,136 @@ describe("Step 2 — AI Usage Tracking & Settlement Integration", () => {
       expect(isExistingActive).toBe(true);
     });
   });
+
+  describe("Direct Stage-Level Deduction & Balance Gate (No reservation)", () => {
+    it("deducts credits directly at stage without reservation and reports remainingBalance & isExhausted", async () => {
+      const executionId = "exec_stage_direct_101";
+
+      jest.spyOn(AiCreditReservation, "findOne").mockResolvedValue(null);
+
+      const mockWallet = {
+        _id: new mongoose.Types.ObjectId(),
+        ownerId,
+        balance: 5,
+        reservedBalance: 0,
+        monthlyLimit: 5000,
+        monthlyUsed: 10,
+        status: "active",
+        isPeriodExpired: () => false,
+      };
+
+      jest.spyOn(AiWallet, "findOneAndUpdate")
+        .mockResolvedValueOnce(mockWallet) // getOrCreateWallet
+        .mockResolvedValueOnce({ ...mockWallet, balance: 3, monthlyUsed: 12 }); // deduction
+      jest.spyOn(AiCreditTransaction, "create").mockResolvedValue({});
+      jest.spyOn(AiPricingConfig, "findOne").mockReturnValue({
+        sort: jest.fn().mockReturnThis(),
+        lean: jest.fn().mockResolvedValue(null),
+      });
+
+      const mockUsageRecord = {
+        _id: new mongoose.Types.ObjectId(),
+        executionId,
+        ownerId,
+        inputTokens: 400,
+        outputTokens: 200,
+        creditsCharged: 2,
+        executionStatus: "in_progress",
+      };
+      jest.spyOn(AiUsageRecord, "findOneAndUpdate").mockResolvedValue(mockUsageRecord);
+
+      const result = await aiBillingService.recordUsageAndSettle({
+        executionId,
+        userId,
+        storeId,
+        inputTokens: 400,
+        outputTokens: 200,
+        metadata: { stageName: "think", isStageDeduction: true, ownerId },
+      });
+
+      expect(result).toBeDefined();
+      expect(result.creditsCharged).toBe(2);
+      expect(result.remainingBalance).toBe(3);
+      expect(result.isExhausted).toBe(false);
+    });
+
+    it("detects wallet exhaustion when balance drops to 0", async () => {
+      const executionId = "exec_stage_exhaust_202";
+
+      jest.spyOn(AiCreditReservation, "findOne").mockResolvedValue(null);
+
+      const mockWallet = {
+        _id: new mongoose.Types.ObjectId(),
+        ownerId,
+        balance: 2,
+        reservedBalance: 0,
+        monthlyLimit: 5000,
+        monthlyUsed: 100,
+        status: "active",
+        isPeriodExpired: () => false,
+      };
+
+      jest.spyOn(AiWallet, "findOneAndUpdate")
+        .mockResolvedValueOnce(mockWallet) // getOrCreateWallet
+        .mockResolvedValueOnce({ ...mockWallet, balance: 0, monthlyUsed: 102 }); // deduction
+      jest.spyOn(AiCreditTransaction, "create").mockResolvedValue({});
+      jest.spyOn(AiPricingConfig, "findOne").mockReturnValue({
+        sort: jest.fn().mockReturnThis(),
+        lean: jest.fn().mockResolvedValue(null),
+      });
+      jest.spyOn(AiUsageRecord, "findOneAndUpdate").mockResolvedValue({
+        executionId,
+        creditsCharged: 2,
+      });
+
+      const result = await aiBillingService.recordUsageAndSettle({
+        executionId,
+        userId,
+        storeId,
+        inputTokens: 400,
+        outputTokens: 200,
+        metadata: { stageName: "tool_exec", isStageDeduction: true, ownerId },
+      });
+
+      expect(result.creditsCharged).toBe(2);
+      expect(result.remainingBalance).toBe(0);
+      expect(result.isExhausted).toBe(true);
+    });
+
+    it("checkBalance returns allowed: true when wallet has positive balance", async () => {
+      const mockWallet = {
+        _id: new mongoose.Types.ObjectId(),
+        ownerId,
+        balance: 15,
+        monthlyLimit: 5000,
+        monthlyUsed: 50,
+        status: "active",
+        isPeriodExpired: () => false,
+      };
+      jest.spyOn(AiWallet, "findOneAndUpdate").mockResolvedValue(mockWallet);
+
+      const check = await aiBillingService.checkBalance({ ownerId });
+      expect(check.allowed).toBe(true);
+      expect(check.balance).toBe(15);
+      expect(check.reason).toBeNull();
+    });
+
+    it("checkBalance returns allowed: false and INSUFFICIENT_CREDITS when balance is 0", async () => {
+      const mockWallet = {
+        _id: new mongoose.Types.ObjectId(),
+        ownerId,
+        balance: 0,
+        monthlyLimit: 5000,
+        monthlyUsed: 50,
+        status: "active",
+        isPeriodExpired: () => false,
+      };
+      jest.spyOn(AiWallet, "findOneAndUpdate").mockResolvedValue(mockWallet);
+
+      const check = await aiBillingService.checkBalance({ ownerId });
+      expect(check.allowed).toBe(false);
+      expect(check.balance).toBe(0);
+      expect(check.reason).toBe("INSUFFICIENT_CREDITS");
+    });
+  });
 });

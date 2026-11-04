@@ -14,6 +14,7 @@ import {
   internalSettleController,
   internalReleaseController,
   internalReportUsageController,
+  internalCheckBalanceController,
 } from "./aiBilling.controller.js";
 
 const router = Router();
@@ -56,6 +57,7 @@ router.post("/top-up/create-order", requireUser, createTopUpOrderController);
 router.post("/top-up/verify", requireUser, verifyTopUpController);
 
 // Internal service-to-service endpoints
+router.post("/internal/check-balance", requireInternalAuth, internalCheckBalanceController);
 router.post("/internal/reserve", requireInternalAuth, internalReserveController);
 router.post("/internal/settle", requireInternalAuth, internalSettleController);
 router.post("/internal/release", requireInternalAuth, internalReleaseController);
