@@ -20,6 +20,11 @@ const productSchema = new mongoose.Schema({
         trim: true
     },
 
+    batchNumber: {
+        type: String,
+        trim: true,
+        default: null
+    },
     sku: {
         type: String,
         trim: true,

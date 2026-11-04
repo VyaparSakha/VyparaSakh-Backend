@@ -1,4 +1,4 @@
-import { addProduct, getProductById, updateProductById, deleteProductById, getAllProducts, getProductByBarcode, getMasterProduct, saveMasterProduct, searchProductsInStore } from "./product.service.js";
+import { addProduct, getProductById, updateProductById, deleteProductById, getAllProducts, getProductByBarcode, getMasterProduct, saveMasterProduct, searchProductsInStore, getProductWithBatches } from "./product.service.js";
 import { resolveBarcode } from "./resolver.service.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 import { uploadBufferToCloudinary } from "../../utils/cloudinary.js";
@@ -203,6 +203,27 @@ export const uploadProductImageController = async (req, res) => {
     } catch (error) {
         return res.status(error.statusCode || 500).json(
             new ApiResponse(null, error.message || "Image upload failed", error.statusCode || 500)
+        );
+    }
+};
+
+// Get product details + all batches for a barcode (for existing-barcode modal)
+// GET /api/product/barcode/:barcode/details?storeId=...
+export const getProductWithBatchesController = async (req, res) => {
+    try {
+        const { barcode } = req.params;
+        const storeId = req.query?.storeId || req.headers?.["x-store-id"];
+
+        const result = await getProductWithBatches(barcode, storeId);
+
+        if (!result) {
+            return res.status(404).json(new ApiResponse(null, "Product not found with this barcode", 404));
+        }
+
+        return res.status(200).json(new ApiResponse(result, "Product with batches fetched successfully", 200));
+    } catch (error) {
+        return res.status(error.statusCode || 500).json(
+            new ApiResponse(null, error.message || "Failed to fetch product with batches.", error.statusCode || 500)
         );
     }
 };

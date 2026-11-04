@@ -37,6 +37,19 @@ const saleItemSchema = new mongoose.Schema(
       required: true,
       min: 0,
     },
+    batchId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Batch",
+      default: null,
+    },
+    batchNumberSnapshot: {
+      type: String,
+      default: null,
+    
+      type: Number,
+      required: true,
+      min: 0,
+    },
   },
   { _id: false }
 );

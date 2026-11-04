@@ -5,6 +5,7 @@ import { sendLowStockNotificationEmail } from "../../utils/mailer.js";
 import { createBuyer } from "../buyer/buyer.service.js";
 import { checkInventoryAlertsService } from "../notification/notification.service.js";
 import { notifySaleCreated } from "../../events/notificationEvents.js";
+import { decrementBatchStock } from "../batch/batch.service.js";
 
 const buildSaleItems = (cart) =>
   cart.products.map((item) => {
