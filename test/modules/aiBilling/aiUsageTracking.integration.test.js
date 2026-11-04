@@ -414,5 +414,58 @@ describe("Step 2 — AI Usage Tracking & Settlement Integration", () => {
       expect(check.balance).toBe(0);
       expect(check.reason).toBe("INSUFFICIENT_CREDITS");
     });
+
+    it("checkBalance resolves owner from store.owner when given storeId", async () => {
+      const Store = (await import("../../../models/store.model.js")).default;
+      const mockStore = {
+        _id: storeId,
+        owner: ownerId,
+      };
+      jest.spyOn(Store, "findById").mockReturnValue({
+        select: jest.fn().mockResolvedValue(mockStore),
+      });
+
+      const mockWallet = {
+        _id: new mongoose.Types.ObjectId(),
+        ownerId,
+        balance: 100,
+        monthlyLimit: 5000,
+        monthlyUsed: 0,
+        status: "active",
+        isPeriodExpired: () => false,
+      };
+      jest.spyOn(AiWallet, "findOneAndUpdate").mockResolvedValue(mockWallet);
+
+      const check = await aiBillingService.checkBalance({ storeId: storeId.toString() });
+      expect(check.allowed).toBe(true);
+      expect(check.balance).toBe(100);
+    });
+
+    it("checkBalance resolves owner from User firebaseUid when userId is a Firebase string", async () => {
+      const User = (await import("../../../models/user.model.js")).default;
+      const firebaseUid = "unR0Rpg3sQgSKFhKfCxD3AjWz4q1";
+      const mockUser = {
+        _id: ownerId,
+        firebaseUid,
+      };
+      jest.spyOn(User, "findOne").mockReturnValue({
+        select: jest.fn().mockResolvedValue(mockUser),
+      });
+
+      const mockWallet = {
+        _id: new mongoose.Types.ObjectId(),
+        ownerId,
+        balance: 50,
+        monthlyLimit: 5000,
+        monthlyUsed: 10,
+        status: "active",
+        isPeriodExpired: () => false,
+      };
+      jest.spyOn(AiWallet, "findOneAndUpdate").mockResolvedValue(mockWallet);
+
+      const check = await aiBillingService.checkBalance({ userId: firebaseUid });
+      expect(check.allowed).toBe(true);
+      expect(check.balance).toBe(50);
+    });
   });
 });
