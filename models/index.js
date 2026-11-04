@@ -22,6 +22,7 @@ import AiWallet from './aiWallet.model.js';
 import AiCreditTransaction from './aiCreditTransaction.model.js';
 import AiCreditReservation from './aiCreditReservation.model.js';
 import AiPricingConfig from './aiPricingConfig.model.js';
+import AiUsageRecord from './aiUsageRecord.model.js';
 
 export {
     Store,
@@ -47,7 +48,8 @@ export {
     AiWallet,
     AiCreditTransaction,
     AiCreditReservation,
-    AiPricingConfig
+    AiPricingConfig,
+    AiUsageRecord
 };
 
 export default {
@@ -74,5 +76,6 @@ export default {
     AiWallet,
     AiCreditTransaction,
     AiCreditReservation,
-    AiPricingConfig
+    AiPricingConfig,
+    AiUsageRecord
 };

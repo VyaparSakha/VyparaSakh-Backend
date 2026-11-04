@@ -9,6 +9,7 @@ import {
   internalReserveController,
   internalSettleController,
   internalReleaseController,
+  internalReportUsageController,
 } from "./aiBilling.controller.js";
 
 const router = Router();
@@ -50,6 +51,7 @@ router.get("/pricing", requireUser, getPricingController);
 router.post("/internal/reserve", requireInternalAuth, internalReserveController);
 router.post("/internal/settle", requireInternalAuth, internalSettleController);
 router.post("/internal/release", requireInternalAuth, internalReleaseController);
+router.post("/internal/report-usage", requireInternalAuth, internalReportUsageController);
 
 export default router;
 

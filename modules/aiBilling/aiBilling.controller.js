@@ -267,3 +267,60 @@ export const internalReleaseController = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/ai-billing/internal/report-usage
+ * Receives normalized usage report from Python FastAPI service, calculates authoritative
+ * charges using configured rates, settles reservation, and persists audited usage record.
+ */
+export const internalReportUsageController = async (req, res) => {
+  try {
+    const {
+      executionId,
+      userId,
+      storeId,
+      feature,
+      provider,
+      model,
+      inputTokens,
+      outputTokens,
+      audioInputUnits,
+      audioOutputUnits,
+      voiceDurationSeconds,
+      modelBreakdown,
+      executionStatus,
+      metadata,
+    } = req.body;
+
+    const result = await aiBillingService.recordUsageAndSettle({
+      executionId,
+      userId,
+      storeId,
+      feature,
+      provider,
+      model,
+      inputTokens,
+      outputTokens,
+      audioInputUnits,
+      audioOutputUnits,
+      voiceDurationSeconds,
+      modelBreakdown,
+      executionStatus,
+      metadata,
+    });
+
+    res
+      .status(200)
+      .json(new ApiResponse(result, "Usage reported and settled successfully", 200));
+  } catch (error) {
+    res
+      .status(error.statusCode || 400)
+      .json(
+        new ApiResponse(
+          null,
+          error.message || "Failed to record usage and settle",
+          error.statusCode || 400
+        )
+      );
+  }
+};
+

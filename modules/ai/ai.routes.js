@@ -6,7 +6,8 @@ import mongoose from "mongoose";
 
 import authMiddleware from "../../middlewares/auth.middleware.js";
 import requireUser from "../../middlewares/requireUser.middleware.js";
-import { Store, Employee, User } from "../../models/index.js";
+import { Store, Employee, User, AiCreditReservation } from "../../models/index.js";
+import * as aiBillingService from "../aiBilling/aiBilling.service.js";
 import { ALL_PERMISSIONS } from "../../utils/permissions.js";
 
 import http from "http";
@@ -116,37 +117,90 @@ const resolveAiStoreContext = async (req, res, next) => {
       };
     }
 
-    // Check account-level AI credit quota on the Store Owner's account
+    // Resolve the billable store owner's account
     const billableOwner = authContext.isOwner
       ? req.user
       : await User.findById(store.owner);
 
-    if (billableOwner && typeof billableOwner.hasAiCredits === "function" && !billableOwner.hasAiCredits()) {
-      const quotaMessage = authContext.isOwner
-        ? "Your account AI monthly query quota has been reached. Please upgrade your plan in Account Settings."
-        : "Store owner's account AI subscription quota reached. Please notify your store owner to upgrade or renew their account plan.";
-      return res.status(402).json({
+    if (!billableOwner) {
+      return res.status(404).json({
         success: false,
-        message: quotaMessage,
-        statusCode: 402,
+        message: "Store owner account not found",
+        statusCode: 404,
       });
     }
 
-    // Increment AI credit usage for the store owner's account asynchronously
-    if (billableOwner && typeof billableOwner.consumeAiCredit === "function") {
-      billableOwner.consumeAiCredit(1).catch((err) => {
-        console.error("[AI QUOTA] Failed to consume AI credit for owner account:", billableOwner._id, err.message);
-      });
+    // Identify if this is a billable AI endpoint (e.g. copilot stream or clarify)
+    const isBillableAiRoute =
+      req.originalUrl.includes("/copilot") || req.originalUrl.includes("/clarify");
+
+    let executionId = null;
+
+    if (isBillableAiRoute) {
+      // 2.1 Identify or reuse execution ID:
+      // If client responds to a clarification prompt, reuse the existing executionId without re-charging a fixed fee
+      executionId =
+        req.headers["x-execution-id"] ||
+        req.body?.executionId ||
+        req.body?.execution_id ||
+        null;
+
+      let isExistingActiveReservation = false;
+      if (executionId) {
+        const existingRes = await AiCreditReservation.findOne({
+          executionId: executionId.toString().trim(),
+          status: "active",
+        });
+        if (existingRes) {
+          isExistingActiveReservation = true;
+        }
+      }
+
+      // If no active reservation exists (new message or new execution), reserve budget
+      if (!isExistingActiveReservation) {
+        if (!executionId) {
+          executionId = `exec_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+        }
+
+        try {
+          await aiBillingService.reserveCredits({
+            ownerId: billableOwner._id,
+            storeId: currentStoreId,
+            executionId,
+            credits: 25, // Standard reservation buffer (unspent credits will be released)
+            featureName: "copilot",
+            metadata: {
+              userId: currentUserId,
+              membershipType: authContext.membershipType,
+            },
+          });
+        } catch (resErr) {
+          console.warn("[AI BILLING] Credit reservation failed:", resErr.message);
+          const quotaMessage = authContext.isOwner
+            ? resErr.message || "Insufficient AI credits. Please upgrade or top up your wallet in Settings."
+            : "Store owner's account has insufficient AI credits or has reached its monthly usage limit.";
+          return res.status(402).json({
+            success: false,
+            code: "INSUFFICIENT_CREDITS",
+            message: quotaMessage,
+            statusCode: 402,
+          });
+        }
+      }
     }
 
     req.store = store;
     req.authContext = authContext;
+    req.executionId = executionId;
+    req.billableOwner = billableOwner;
     req.aiHeaders = {
       "x-store-id": authContext.storeId,
       "x-user-id": authContext.userId,
       "x-is-owner": authContext.isOwner ? "true" : "false",
       "x-user-role": authContext.roleName,
       "x-user-permissions": authContext.permissions.join(","),
+      ...(executionId ? { "x-execution-id": executionId } : {}),
+      "x-owner-id": billableOwner._id.toString(),
     };
 
     next();
@@ -317,9 +371,11 @@ const sseProxy = async (req, res) => {
   // Prepare request body
   // --------------------------------------------------------------------------
 
-  const body = JSON.stringify(
-    req.body || {}
-  );
+  const bodyObj = { ...(req.body || {}) };
+  if (req.executionId && !bodyObj.execution_id && !bodyObj.executionId) {
+    bodyObj.execution_id = req.executionId;
+  }
+  const body = JSON.stringify(bodyObj);
 
 
   // --------------------------------------------------------------------------
@@ -343,10 +399,7 @@ const sseProxy = async (req, res) => {
   };
 
   if (req.aiHeaders) {
-    headers["x-store-id"] = req.aiHeaders["x-store-id"];
-    headers["x-is-owner"] = req.aiHeaders["x-is-owner"];
-    headers["x-user-role"] = req.aiHeaders["x-user-role"];
-    headers["x-user-permissions"] = req.aiHeaders["x-user-permissions"];
+    Object.assign(headers, req.aiHeaders);
   }
 
   const options = {
@@ -439,6 +492,15 @@ const sseProxy = async (req, res) => {
               }
             );
 
+            // Release any reserved credits since execution failed
+            if (req.executionId) {
+              aiBillingService.releaseReservation({
+                executionId: req.executionId,
+                reason: `FastAPI error response: ${proxyRes.statusCode}`,
+              }).catch((err) => {
+                console.warn("[AI BILLING] Error releasing reservation on upstream error:", err.message);
+              });
+            }
 
             // Send SSE error event
 
@@ -507,10 +569,63 @@ const sseProxy = async (req, res) => {
 
 
       // ----------------------------------------------------------------------
-      // Forward FastAPI stream directly
+      // Forward FastAPI stream and intercept usage event for billing settlement
       // ----------------------------------------------------------------------
 
+      let sseBuffer = "";
+      let isUsageSettled = false;
+
+      proxyRes.on("data", async (chunk) => {
+        try {
+          sseBuffer += chunk.toString("utf8");
+
+          // Look for event: usage in accumulated SSE buffer
+          if (sseBuffer.includes("event: usage")) {
+            const usageMatch = sseBuffer.match(/event:\s*usage\s*\ndata:\s*(\{.*?\})\n/s);
+            if (usageMatch && !isUsageSettled && req.executionId) {
+              isUsageSettled = true;
+              try {
+                const usageData = JSON.parse(usageMatch[1]);
+                await aiBillingService.recordUsageAndSettle({
+                  executionId: req.executionId,
+                  ownerId: req.billableOwner?._id,
+                  userId: req.user?._id || req.authContext?.userId,
+                  storeId: req.authContext?.storeId,
+                  feature: "copilot",
+                  provider: usageData.provider || "groq",
+                  model: usageData.model || "unknown",
+                  modelBreakdown: usageData.modelBreakdown || usageData.breakdown || [],
+                  inputTokens: usageData.inputTokens || usageData.input_tokens || 0,
+                  outputTokens: usageData.outputTokens || usageData.output_tokens || 0,
+                  audioInputUnits: usageData.audioInputUnits || usageData.audio_input_seconds || 0,
+                  audioOutputUnits: usageData.audioOutputUnits || usageData.audio_output_seconds || 0,
+                  executionStatus: usageData.executionStatus || "completed",
+                });
+              } catch (settleErr) {
+                console.error("[SSE PROXY] Usage settlement failed in stream proxy:", settleErr.message);
+              }
+            }
+          }
+        } catch (bufErr) {
+          console.warn("[SSE PROXY] Buffer parsing error:", bufErr.message);
+        }
+      });
+
       proxyRes.pipe(res);
+
+      proxyRes.on("end", async () => {
+        // If stream finished without an event: usage, release unused reservation
+        if (!isUsageSettled && req.executionId) {
+          try {
+            await aiBillingService.releaseReservation({
+              executionId: req.executionId,
+              reason: "Stream closed without usage event",
+            });
+          } catch (relErr) {
+            // Already settled or released
+          }
+        }
+      });
 
 
       // ----------------------------------------------------------------------
@@ -527,6 +642,12 @@ const sseProxy = async (req, res) => {
             err.message
           );
 
+          if (req.executionId && !isUsageSettled) {
+            aiBillingService.releaseReservation({
+              executionId: req.executionId,
+              reason: `FastAPI stream error: ${err.message}`,
+            }).catch(() => {});
+          }
 
           if (!res.writableEnded) {
 
@@ -557,6 +678,12 @@ const sseProxy = async (req, res) => {
         err
       );
 
+      if (req.executionId) {
+        aiBillingService.releaseReservation({
+          executionId: req.executionId,
+          reason: `Upstream connection failure: ${err.message}`,
+        }).catch(() => {});
+      }
 
       if (!res.headersSent) {
 
@@ -626,6 +753,13 @@ const sseProxy = async (req, res) => {
 
         proxyReq.destroy();
 
+      }
+
+      if (req.executionId) {
+        aiBillingService.releaseReservation({
+          executionId: req.executionId,
+          reason: "Client disconnected prematurely",
+        }).catch(() => {});
       }
 
     }

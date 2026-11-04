@@ -1,8 +1,10 @@
 import mongoose from "mongoose";
+import Store from "../../models/store.model.js";
 import AiWallet, { getCalendarMonthPeriod } from "../../models/aiWallet.model.js";
 import AiCreditTransaction from "../../models/aiCreditTransaction.model.js";
 import AiCreditReservation from "../../models/aiCreditReservation.model.js";
-import { DEFAULT_PRICING_CONFIG } from "./aiPricing.js";
+import AiUsageRecord from "../../models/aiUsageRecord.model.js";
+import { DEFAULT_PRICING_CONFIG, resolvePricingConfig, calculateCredits } from "./aiPricing.js";
 
 export const DEFAULT_INITIAL_BALANCE = 1000; // Free welcome grant for store owners
 export const DEFAULT_MONTHLY_LIMIT = 5000; // Monthly usage cap for safety
@@ -130,7 +132,18 @@ export const reserveCredits = async ({
   featureName = "copilot",
   metadata = {},
 } = {}) => {
-  const normalizedOwnerId = toObjectId(ownerId);
+  let normalizedOwnerId = toObjectId(ownerId);
+  if (!normalizedOwnerId && storeId) {
+    try {
+      const store = await Store.findById(toObjectId(storeId));
+      if (store && store.owner) {
+        normalizedOwnerId = store.owner;
+      }
+    } catch (err) {
+      // Store lookup failed
+    }
+  }
+
   if (!normalizedOwnerId) {
     throw new Error("Invalid or missing ownerId for credit reservation");
   }
@@ -592,5 +605,123 @@ export const grantCredits = async ({
   });
 
   return updatedWallet;
+};
+
+/**
+ * 2.5 & 2.8 Record Actual Usage & Settle
+ *
+ * Called when FastAPI reports normalized usage for an execution.
+ * - Validates executionId and reservation.
+ * - If already settled, returns existing record (idempotent).
+ * - Calculates authoritative customer credits using trusted pricing config and calculateCredits.
+ * - Settles reservation atomically.
+ * - Stores immutable AiUsageRecord with model breakdown for auditing.
+ */
+export const recordUsageAndSettle = async ({
+  executionId,
+  userId = null,
+  storeId = null,
+  feature = "copilot",
+  provider = "default",
+  model = "default",
+  inputTokens = 0,
+  outputTokens = 0,
+  audioInputUnits = 0,
+  audioOutputUnits = 0,
+  voiceDurationSeconds = 0,
+  modelBreakdown = [],
+  executionStatus = "completed",
+  metadata = {},
+} = {}) => {
+  if (!executionId || typeof executionId !== "string" || !executionId.trim()) {
+    throw new Error("Valid executionId is required to record usage and settle");
+  }
+
+  const reservation = await AiCreditReservation.findOne({ executionId: executionId.trim() });
+  if (!reservation) {
+    throw new Error(`Active credit reservation not found for executionId: ${executionId}`);
+  }
+
+  // Idempotency: Return existing usage record if already settled
+  if (reservation.status === "settled") {
+    const existingUsage = await AiUsageRecord.findOne({ executionId: executionId.trim() });
+    const wallet = await AiWallet.findById(reservation.walletId);
+    return {
+      usageRecord: existingUsage,
+      reservation,
+      wallet,
+      alreadySettled: true,
+    };
+  }
+
+  // Authoritative credit calculation on Express using configured rates
+  const pricingConfig = await resolvePricingConfig({
+    featureName: feature,
+    provider,
+    model,
+  });
+
+  const { credits, tokenCredits, audioCredits, voiceCredits } = calculateCredits({
+    inputTokens,
+    outputTokens,
+    audioInputUnits,
+    audioOutputUnits,
+    voiceDurationSeconds,
+    config: pricingConfig,
+  });
+
+  // Perform atomic settlement on the customer's wallet
+  const settlementResult = await settleCredits({
+    executionId: executionId.trim(),
+    actualCredits: credits,
+    idempotencyKey: `settle_usage_${executionId.trim()}`,
+    metadata: {
+      ...metadata,
+      feature,
+      provider,
+      model,
+      inputTokens,
+      outputTokens,
+      tokenCredits,
+      audioCredits,
+      voiceCredits,
+      pricingVersion: pricingConfig.pricingVersion || 1,
+    },
+  });
+
+  // Store audited usage record
+  const usageRecord = await AiUsageRecord.findOneAndUpdate(
+    { executionId: executionId.trim() },
+    {
+      $setOnInsert: {
+        ownerId: reservation.ownerId,
+        userId: toObjectId(userId) || reservation.ownerId,
+        storeId: toObjectId(storeId) || reservation.storeId,
+        executionId: executionId.trim(),
+        feature,
+        provider,
+        model,
+        modelBreakdown: Array.isArray(modelBreakdown) ? modelBreakdown : [],
+        inputTokens: Math.max(0, Number(inputTokens) || 0),
+        outputTokens: Math.max(0, Number(outputTokens) || 0),
+        totalTokens: Math.max(0, Number(inputTokens) || 0) + Math.max(0, Number(outputTokens) || 0),
+        audioInputUnits: Math.max(0, Number(audioInputUnits) || 0),
+        audioOutputUnits: Math.max(0, Number(audioOutputUnits) || 0),
+        creditsCharged: settlementResult.reservation.consumedCredits,
+        pricingVersion: pricingConfig.pricingVersion || 1,
+        executionStatus: executionStatus || "completed",
+        metadata,
+        settledAt: new Date(),
+      },
+    },
+    { upsert: true, new: true }
+  );
+
+  return {
+    usageRecord,
+    reservation: settlementResult.reservation,
+    wallet: settlementResult.wallet,
+    creditsCharged: settlementResult.reservation.consumedCredits,
+  };
 };
 

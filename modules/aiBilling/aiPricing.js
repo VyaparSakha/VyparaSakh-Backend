@@ -54,7 +54,7 @@ export const resolvePricingConfig = async ({
     });
 
     if (config) {
-      return config.toObject();
+      return typeof config.toObject === "function" ? config.toObject() : config;
     }
   } catch (err) {
     console.warn("[AI PRICING] Error resolving DB pricing config, using defaults:", err.message);
