@@ -18,6 +18,10 @@ import PurchaseOrder from './purchaseOrder.model.js';
 import GRN from './grn.model.js';
 import Invitation from './invitation.model.js';
 import AuditLog from './auditLog.model.js';
+import AiWallet from './aiWallet.model.js';
+import AiCreditTransaction from './aiCreditTransaction.model.js';
+import AiCreditReservation from './aiCreditReservation.model.js';
+import AiPricingConfig from './aiPricingConfig.model.js';
 
 export {
     Store,
@@ -39,7 +43,11 @@ export {
     PurchaseOrder,
     GRN,
     Invitation,
-    AuditLog
+    AuditLog,
+    AiWallet,
+    AiCreditTransaction,
+    AiCreditReservation,
+    AiPricingConfig
 };
 
 export default {
@@ -62,5 +70,9 @@ export default {
     PurchaseOrder,
     GRN,
     Invitation,
-    AuditLog
+    AuditLog,
+    AiWallet,
+    AiCreditTransaction,
+    AiCreditReservation,
+    AiPricingConfig
 };

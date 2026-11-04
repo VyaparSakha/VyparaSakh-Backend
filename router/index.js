@@ -5,6 +5,7 @@ import userRoutes from "../modules/user/user.routes.js";
 import cartRoutes from "../modules/cart/cart.routes.js";
 import saleRoutes from "../modules/sale/sale.routes.js";
 import aiRoutes from "../modules/ai/ai.routes.js";
+import aiBillingRoutes from "../modules/aiBilling/aiBilling.routes.js";
 import inviteRoutes from "../modules/invite/invite.routes.js";
 import invitationRoutes from "../modules/invitation/invitation.routes.js";
 import analyticsRoutes from "../modules/analytics/analytics.route.js";
@@ -34,6 +35,7 @@ router.use("/products", productRoutes);
 router.use("/cart", cartRoutes);
 router.use("/sales", saleRoutes);
 router.use("/ai", aiRoutes);
+router.use("/ai-billing", aiBillingRoutes);
 
 // Support both /invitations and /invite
 router.use("/invitations", invitationRoutes);
