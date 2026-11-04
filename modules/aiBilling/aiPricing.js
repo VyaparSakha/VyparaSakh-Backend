@@ -16,10 +16,10 @@ export const DEFAULT_PRICING_CONFIG = {
   featureName: "default",
   provider: "default",
   model: "default",
-  inputTokenCreditRate: 2, // 2 credits per 1k input tokens
-  outputTokenCreditRate: 6, // 6 credits per 1k output tokens
-  audioInputRate: 1, // 1 credit per second of audio input
-  audioOutputRate: 2, // 2 credits per second of audio output
+  inputTokenCreditRate: 2, // Baseline development rate for small tests
+  outputTokenCreditRate: 6,
+  audioInputRate: 1,
+  audioOutputRate: 2,
   voiceDurationRate: 0,
   minCharge: 1, // At least 1 credit per execution
   maxExecutionCharge: 250, // Absolute ceiling to protect customer wallets
@@ -29,7 +29,7 @@ export const DEFAULT_PRICING_CONFIG = {
 
 /**
  * Resolves pricing configuration for a given feature, provider, and model.
- * Looks for exact match in MongoDB first, falling back to feature defaults or static defaults.
+ * Looks for exact match in MongoDB first, falling back to model-calibrated defaults or static defaults.
  */
 export const resolvePricingConfig = async ({
   featureName = "default",
@@ -58,6 +58,25 @@ export const resolvePricingConfig = async ({
     }
   } catch (err) {
     console.warn("[AI PRICING] Error resolving DB pricing config, using defaults:", err.message);
+  }
+
+  const provLower = (provider || "").toLowerCase();
+  const modLower = (model || "").toLowerCase();
+
+  // Calibrated production rates for high-context models (Gemini Flash)
+  // Ensures 40k+ token queries cost 2-4 credits instead of 90+ credits
+  if (provLower === "gemini" || modLower.includes("gemini") || modLower.includes("flash")) {
+    return {
+      ...DEFAULT_PRICING_CONFIG,
+      featureName,
+      provider,
+      model,
+      inputTokenCreditRate: 0.05, // 0.05 credits per 1,000 input tokens (1 credit per 20,000 tokens)
+      outputTokenCreditRate: 0.15, // 0.15 credits per 1,000 output tokens (1 credit per 6,666 tokens)
+      audioInputRate: 0.05, // ~3 credits per minute
+      audioOutputRate: 0.10, // ~6 credits per minute
+      maxExecutionCharge: 50,
+    };
   }
 
   return { ...DEFAULT_PRICING_CONFIG, featureName, provider, model };
