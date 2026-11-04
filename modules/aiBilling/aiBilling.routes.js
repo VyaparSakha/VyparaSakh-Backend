@@ -6,6 +6,10 @@ import {
   getUsageController,
   getTransactionsController,
   getPricingController,
+  updateSettingsController,
+  getPackagesController,
+  createTopUpOrderController,
+  verifyTopUpController,
   internalReserveController,
   internalSettleController,
   internalReleaseController,
@@ -46,6 +50,10 @@ router.get("/wallet", requireUser, getWalletController);
 router.get("/usage", requireUser, getUsageController);
 router.get("/transactions", requireUser, getTransactionsController);
 router.get("/pricing", requireUser, getPricingController);
+router.put("/settings", requireUser, updateSettingsController);
+router.get("/packages", requireUser, getPackagesController);
+router.post("/top-up/create-order", requireUser, createTopUpOrderController);
+router.post("/top-up/verify", requireUser, verifyTopUpController);
 
 // Internal service-to-service endpoints
 router.post("/internal/reserve", requireInternalAuth, internalReserveController);

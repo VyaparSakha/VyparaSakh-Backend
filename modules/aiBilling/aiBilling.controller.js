@@ -324,3 +324,111 @@ export const internalReportUsageController = async (req, res) => {
   }
 };
 
+/**
+ * PUT /api/ai-billing/settings
+ * Update wallet settings (monthly limits, administrative controls) — Owner only
+ */
+export const updateSettingsController = async (req, res) => {
+  try {
+    const context = await resolveOwnerContext(req);
+    if (!context.isOwner) {
+      return res
+        .status(403)
+        .json(new ApiResponse(null, "Only business owners can update AI billing settings", 403));
+    }
+
+    const { monthlyLimit } = req.body;
+    const wallet = await aiBillingService.updateWalletSettings({
+      ownerId: context.ownerId,
+      monthlyLimit,
+    });
+
+    res
+      .status(200)
+      .json(new ApiResponse(wallet, "AI billing settings updated successfully", 200));
+  } catch (error) {
+    res
+      .status(error.statusCode || 400)
+      .json(new ApiResponse(null, error.message || "Failed to update settings", error.statusCode || 400));
+  }
+};
+
+/**
+ * GET /api/ai-billing/packages
+ * Returns available top-up credit booster packages
+ */
+export const getPackagesController = async (req, res) => {
+  try {
+    const packages = Object.values(aiBillingService.TOP_UP_PACKAGES);
+    res
+      .status(200)
+      .json(new ApiResponse(packages, "Available top-up packages retrieved successfully", 200));
+  } catch (error) {
+    res
+      .status(500)
+      .json(new ApiResponse(null, "Failed to load packages", 500));
+  }
+};
+
+/**
+ * POST /api/ai-billing/top-up/create-order
+ * Creates an order reference for Razorpay top-up
+ */
+export const createTopUpOrderController = async (req, res) => {
+  try {
+    const context = await resolveOwnerContext(req);
+    if (!context.isOwner) {
+      return res
+        .status(403)
+        .json(new ApiResponse(null, "Only business owners can purchase AI credit top-ups", 403));
+    }
+
+    const { packageId } = req.body;
+    const order = await aiBillingService.createTopUpOrder({
+      ownerId: context.ownerId,
+      packageId,
+    });
+
+    res
+      .status(200)
+      .json(new ApiResponse(order, "Top-up order created successfully", 200));
+  } catch (error) {
+    res
+      .status(error.statusCode || 400)
+      .json(new ApiResponse(null, error.message || "Failed to create order", error.statusCode || 400));
+  }
+};
+
+/**
+ * POST /api/ai-billing/top-up/verify
+ * Verifies Razorpay signature and applies credits atomically with idempotency
+ */
+export const verifyTopUpController = async (req, res) => {
+  try {
+    const context = await resolveOwnerContext(req);
+    if (!context.isOwner) {
+      return res
+        .status(403)
+        .json(new ApiResponse(null, "Only business owners can complete top-ups", 403));
+    }
+
+    const { orderId, paymentId, signature, packageId } = req.body;
+    const result = await aiBillingService.verifyAndApplyTopUp({
+      ownerId: context.ownerId,
+      orderId,
+      paymentId,
+      signature,
+      packageId,
+    });
+
+    res
+      .status(200)
+      .json(new ApiResponse(result, "Credits successfully added to wallet", 200));
+  } catch (error) {
+    res
+      .status(error.statusCode || 400)
+      .json(new ApiResponse(null, error.message || "Payment verification failed", error.statusCode || 400));
+  }
+};
+
+

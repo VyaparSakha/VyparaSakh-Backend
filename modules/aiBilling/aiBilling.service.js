@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import mongoose from "mongoose";
 import Store from "../../models/store.model.js";
 import AiWallet, { getCalendarMonthPeriod } from "../../models/aiWallet.model.js";
@@ -497,12 +498,16 @@ export const getUsageHistory = async ({
 
   const formattedRecords = records.map((r) => ({
     id: r._id,
+    _id: r._id,
     executionId: r.executionId,
     date: r.createdAt,
+    createdAt: r.createdAt,
+    settledAt: r.updatedAt || r.createdAt,
     feature: r.featureName || "copilot",
     status: r.status,
     reservedCredits: r.reservedCredits,
     creditsConsumed: r.consumedCredits || 0,
+    creditsCharged: r.consumedCredits || 0,
     creditsReleased: r.releasedCredits || 0,
     store: r.storeId
       ? { id: r.storeId._id, name: r.storeId.name, location: r.storeId.location }
@@ -513,6 +518,12 @@ export const getUsageHistory = async ({
   return {
     records: formattedRecords,
     total,
+    pagination: {
+      total,
+      page: safePage,
+      limit: safeLimit,
+      totalPages: Math.ceil(total / safeLimit) || 1,
+    },
     page: safePage,
     totalPages: Math.ceil(total / safeLimit) || 1,
   };
@@ -661,12 +672,17 @@ export const recordUsageAndSettle = async ({
     model,
   });
 
+  const totalCalls = Array.isArray(modelBreakdown)
+    ? modelBreakdown.reduce((sum, b) => sum + (Number(b.callCount) || 1), 0)
+    : 0;
+
   const { credits, tokenCredits, audioCredits, voiceCredits } = calculateCredits({
     inputTokens,
     outputTokens,
     audioInputUnits,
     audioOutputUnits,
     voiceDurationSeconds,
+    callCount: totalCalls,
     config: pricingConfig,
   });
 
@@ -724,4 +740,169 @@ export const recordUsageAndSettle = async ({
     creditsCharged: settlementResult.reservation.consumedCredits,
   };
 };
+
+/**
+ * 3.6 Update Business Owner Wallet Settings (Administrative Control)
+ *
+ * Allows store owners to update their account-wide monthly AI limit.
+ * Values are strictly validated on the server to prevent manipulation.
+ */
+export const updateWalletSettings = async ({
+  ownerId,
+  monthlyLimit,
+} = {}) => {
+  const normalizedOwnerId = toObjectId(ownerId);
+  if (!normalizedOwnerId) {
+    throw new Error("Invalid or missing ownerId");
+  }
+
+  const wallet = await getOrCreateWallet(normalizedOwnerId);
+
+  const updates = {};
+  if (monthlyLimit !== undefined) {
+    const limitNum = Number(monthlyLimit);
+    if (!Number.isInteger(limitNum) || limitNum < 100 || limitNum > 100000) {
+      throw new Error("Monthly limit must be an integer between 100 and 100,000 credits");
+    }
+    updates.monthlyLimit = limitNum;
+  }
+
+  const updatedWallet = await AiWallet.findByIdAndUpdate(
+    wallet._id,
+    { $set: updates },
+    { new: true }
+  );
+
+  return updatedWallet;
+};
+
+/**
+ * 3.7 Top-Up Packages and Razorpay Payment Integration
+ */
+export const TOP_UP_PACKAGES = {
+  starter: {
+    id: "starter",
+    name: "Starter Booster",
+    credits: 1000,
+    priceInr: 199,
+    description: "1,000 AI Credits (~300 copilot queries or 1,000s voice)",
+  },
+  growth: {
+    id: "growth",
+    name: "Growth Booster",
+    credits: 5000,
+    priceInr: 799,
+    description: "5,000 AI Credits (high-volume multi-store queries)",
+  },
+  pro: {
+    id: "pro",
+    name: "Pro Enterprise Booster",
+    credits: 10000,
+    priceInr: 1299,
+    description: "10,000 AI Credits (unlimited daily retail automation)",
+  },
+};
+
+/**
+ * Creates an order reference for Razorpay checkout
+ */
+export const createTopUpOrder = async ({ ownerId, packageId }) => {
+  const normalizedOwnerId = toObjectId(ownerId);
+  if (!normalizedOwnerId) {
+    throw new Error("Invalid ownerId");
+  }
+
+  const pkg = TOP_UP_PACKAGES[packageId];
+  if (!pkg) {
+    throw new Error(`Invalid top-up package: '${packageId}'. Must be one of: starter, growth, pro`);
+  }
+
+  const orderId = `order_ai_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const keyId = process.env.RAZORPAY_KEY_ID || "rzp_test_mock_mode";
+
+  return {
+    orderId,
+    packageId: pkg.id,
+    packageName: pkg.name,
+    credits: pkg.credits,
+    amount: pkg.priceInr * 100, // Amount in paise
+    currency: "INR",
+    keyId,
+    description: `Purchase ${pkg.credits.toLocaleString()} AI Credits for Vyapar Sathi`,
+  };
+};
+
+/**
+ * Verifies Razorpay signature and applies credits atomically with idempotency.
+ */
+export const verifyAndApplyTopUp = async ({
+  ownerId,
+  orderId,
+  paymentId,
+  signature,
+  packageId,
+} = {}) => {
+  const normalizedOwnerId = toObjectId(ownerId);
+  if (!normalizedOwnerId) {
+    throw new Error("Invalid ownerId");
+  }
+
+  if (!paymentId || !orderId) {
+    throw new Error("Missing required paymentId or orderId");
+  }
+
+  const pkg = TOP_UP_PACKAGES[packageId];
+  if (!pkg) {
+    throw new Error(`Invalid packageId '${packageId}'`);
+  }
+
+  // Idempotency: check if paymentId already processed in ledger
+  const existingTx = await AiCreditTransaction.findOne({ idempotencyKey: paymentId });
+  if (existingTx) {
+    const wallet = await getOrCreateWallet(normalizedOwnerId);
+    return {
+      success: true,
+      alreadyProcessed: true,
+      creditsGranted: existingTx.amount,
+      wallet,
+      transaction: existingTx,
+    };
+  }
+
+  // Verify HMAC SHA256 signature if secret is configured
+  const razorpaySecret = process.env.RAZORPAY_KEY_SECRET;
+  if (razorpaySecret) {
+    const generatedSignature = crypto
+      .createHmac("sha256", razorpaySecret)
+      .update(`${orderId}|${paymentId}`)
+      .digest("hex");
+
+    if (generatedSignature !== signature) {
+      throw new Error("Invalid Razorpay payment signature verification failed");
+    }
+  }
+
+  // Apply credits atomically via grantCredits
+  const result = await grantCredits({
+    ownerId: normalizedOwnerId,
+    amount: pkg.credits,
+    description: `Razorpay Payment Top-Up: ${pkg.name} (${pkg.credits} credits)`,
+    idempotencyKey: paymentId,
+    metadata: {
+      orderId,
+      paymentId,
+      packageId: pkg.id,
+      priceInr: pkg.priceInr,
+      verifiedAt: new Date(),
+    },
+  });
+
+  return {
+    success: true,
+    creditsGranted: pkg.credits,
+    wallet: result.wallet,
+    transaction: result.transaction,
+  };
+};
+
 

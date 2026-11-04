@@ -87,6 +87,7 @@ export const calculateCredits = ({
   audioInputUnits = 0,
   audioOutputUnits = 0,
   voiceDurationSeconds = 0,
+  callCount = 0,
   config = DEFAULT_PRICING_CONFIG,
 } = {}) => {
   const cfg = { ...DEFAULT_PRICING_CONFIG, ...config };
@@ -96,6 +97,7 @@ export const calculateCredits = ({
   const safeAudioIn = Math.max(0, Number(audioInputUnits) || 0);
   const safeAudioOut = Math.max(0, Number(audioOutputUnits) || 0);
   const safeVoiceSec = Math.max(0, Number(voiceDurationSeconds) || 0);
+  const safeCallCount = Math.max(0, Number(callCount) || 0);
 
   // Token credits (rates represent credits per 1,000 tokens)
   const tokenCost =
@@ -117,7 +119,15 @@ export const calculateCredits = ({
   let rawTotal = tokenCredits + audioCredits + voiceCredits;
 
   // If operation took place, ensure minimum charge is applied
-  if (rawTotal > 0 || safeInputTokens > 0 || safeOutputTokens > 0) {
+  if (
+    rawTotal > 0 ||
+    safeInputTokens > 0 ||
+    safeOutputTokens > 0 ||
+    safeAudioIn > 0 ||
+    safeAudioOut > 0 ||
+    safeVoiceSec > 0 ||
+    safeCallCount > 0
+  ) {
     rawTotal = Math.max(rawTotal, cfg.minCharge || 1);
   }
 
