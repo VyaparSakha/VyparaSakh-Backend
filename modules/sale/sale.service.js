@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { Product, Sale, Store, Inventory } from "../../models/index.js";
 import { ApiError } from "../../utils/ApiError.js";
 import { assertCartAccess } from "../store/storeAccess.service.js";
@@ -18,6 +19,12 @@ const buildSaleItems = (cart) =>
     const quantity = Number(item.quantity || 0);
     const unitPrice = Number(item.price ?? product.sellingPrice ?? 0);
     const unitBuyingPrice = Number(product.buyingPrice ?? 0);
+    const profit = Number((unitPrice - unitBuyingPrice) * quantity) || 0;
+
+    const safeBatchId =
+      item.batchId && mongoose.isValidObjectId(item.batchId)
+        ? item.batchId
+        : null;
 
     return {
       productId: product._id,
@@ -27,25 +34,34 @@ const buildSaleItems = (cart) =>
       unitPrice,
       unitBuyingPrice,
       lineTotal: unitPrice * quantity,
-      batchId: item.batchId || null,
+      batchId: safeBatchId,
       batchNumberSnapshot: item.batchNumber || null,
+      profitSnapshot: profit,
     };
   });
 
 const ensureInventoryAvailability = async (cart) => {
+  // Aggregate total quantity needed per product across all batches
+  const productRequestedQty = {};
   for (const item of cart.products) {
     const currentProduct = item.product;
-
     if (!currentProduct?.isActive) {
       throw new ApiError(
         `Product "${currentProduct?.name || "Unknown"}" is inactive`,
         400
       );
     }
+    const pId = String(currentProduct._id);
+    productRequestedQty[pId] = (productRequestedQty[pId] || 0) + Number(item.quantity || 0);
+  }
 
-    if ((currentProduct.quantity || 0) < item.quantity) {
+  for (const item of cart.products) {
+    const currentProduct = item.product;
+    const pId = String(currentProduct._id);
+    const totalRequested = productRequestedQty[pId] || 0;
+    if ((currentProduct.quantity || 0) < totalRequested) {
       throw new ApiError(
-        `Insufficient stock for "${currentProduct.name}". Available: ${currentProduct.quantity}`,
+        `Insufficient stock for "${currentProduct.name}". Available: ${currentProduct.quantity}, Requested: ${totalRequested}`,
         400
       );
     }
@@ -58,24 +74,37 @@ const decrementInventory = async (cart) => {
     const qtyToSubtract = Number(item.quantity || 0);
 
     // Decrement from specific batch or earliest-expiry batches (FEFO)
+    let batchUpdated = false;
     try {
-      await decrementBatchStock(
+      const safeBatchId =
+        item.batchId && mongoose.isValidObjectId(item.batchId)
+          ? item.batchId
+          : null;
+
+      const updatedBatches = await decrementBatchStock(
         productId,
         cart.store,
         qtyToSubtract,
-        item.batchId || item.batch?._id || null
+        safeBatchId
       );
+      if (Array.isArray(updatedBatches) && updatedBatches.length > 0) {
+        batchUpdated = true;
+      }
     } catch (batchErr) {
       console.warn("[SALE SERVICE] Could not decrement batch stock:", batchErr.message);
     }
 
     let updatedProd = null;
-    if (Product && typeof Product.findByIdAndUpdate === "function") {
+    // Only decrement Product.quantity directly if no batch was updated,
+    // because decrementBatchStock calls syncProductQuantity which already updated Product.quantity.
+    if (!batchUpdated && Product && typeof Product.findByIdAndUpdate === "function") {
       updatedProd = await Product.findByIdAndUpdate(
         productId,
         { $inc: { quantity: -qtyToSubtract } },
         { new: true }
       );
+    } else {
+      updatedProd = await Product.findById(productId);
     }
 
     // Sync Inventory model if present
@@ -87,7 +116,7 @@ const decrementInventory = async (cart) => {
           await inv.save();
           await checkInventoryAlertsService(cart.store, productId, inv.quantity, inv.minStockLevel || 10);
         } else {
-          await checkInventoryAlertsService(cart.store, productId, updatedProd.quantity, 10);
+          await checkInventoryAlertsService(cart.store, productId, updatedProd?.quantity || 0, 10);
         }
       } catch (invErr) {
         console.warn("[SALE SERVICE] Could not update Inventory record:", invErr.message);
@@ -203,10 +232,25 @@ export const materializeSaleFromCart = async (cartId, userId) => {
     await decrementInventory(cart);
   }
 
+  // Generate unique sequential invoice number
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const countToday = await Sale.countDocuments({
+    store: cart.store,
+    createdAt: { $gte: todayStart },
+  });
+  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const billNumber =
+    cart.billNumber ||
+    `INV-${dateStr}-${String(countToday + 1).padStart(4, "0")}`;
+
+  cart.billNumber = billNumber;
+
   const sale = await Sale.create({
     store: cart.store,
     user: cart.user,
     cart: cart._id,
+    billNumber,
     buyer: cart.buyer || null,
     customerName: cart.customerName || "Walk-in Customer",
     customerPhone: cart.customerPhone || "",
@@ -221,7 +265,7 @@ export const materializeSaleFromCart = async (cartId, userId) => {
   });
 
   console.log(
-    `[SALE SERVICE] Created sale snapshot for cart=${cartId} sale=${sale._id} mode=${isBackfillForCompletedCart ? "backfill" : "live"}`
+    `[SALE SERVICE] Created sale snapshot for cart=${cartId} sale=${sale._id} billNumber=${billNumber} mode=${isBackfillForCompletedCart ? "backfill" : "live"}`
   );
 
   // Auto-update or create Buyer stats for store
@@ -254,6 +298,11 @@ export const materializeSaleFromCart = async (cartId, userId) => {
     sale,
     user: userId,
   });
+
+  // Non-blocking low stock check and alerts
+  checkAndSendLowStockAlerts(cart).catch((err) =>
+    console.error("[SALE SERVICE] Low stock alert error:", err.message)
+  );
 
   return {
     sale,

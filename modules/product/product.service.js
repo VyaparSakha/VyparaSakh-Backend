@@ -106,8 +106,10 @@ export const addProduct = async (productData) => {
 
             const allBatches = await Batch.find({
                 productId: existingProduct._id,
-                store: productData.store
-            }).sort({ isArchived: 1, expiryDate: 1 }).lean();
+                store: productData.store,
+                isArchived: false,
+                quantity: { $gt: 0 }
+            }).sort({ expiryDate: 1 }).lean();
 
             return {
                 ...existingProduct.toObject(),
@@ -161,8 +163,13 @@ export const getProductById = async (productId, storeId = null) => {
             throw new ApiError("Product not found", 404);
         }
         const effectiveStoreId = storeId || product.store;
-        const batches = await Batch.find({ productId: product._id, store: effectiveStoreId })
-            .sort({ isArchived: 1, expiryDate: 1 })
+        const batches = await Batch.find({
+            productId: product._id,
+            store: effectiveStoreId,
+            isArchived: false,
+            quantity: { $gt: 0 }
+        })
+            .sort({ expiryDate: 1 })
             .lean();
         const activeBatch = batches.find(b => !b.isArchived) || batches[0];
         return {
@@ -273,8 +280,10 @@ export const getAllProducts = async (storeId) => {
         const productIds = products.map(p => p._id);
         const batches = await Batch.find({
             store: storeId,
-            productId: { $in: productIds }
-        }).sort({ isArchived: 1, expiryDate: 1 }).lean();
+            productId: { $in: productIds },
+            isArchived: false,
+            quantity: { $gt: 0 }
+        }).sort({ expiryDate: 1 }).lean();
 
         // Group batches by productId
         const batchMap = {};
@@ -320,8 +329,10 @@ export const getProductByBarcode = async (barcode, storeId) => {
         if (!product) return null;
 
         let batches = await Batch.find({
-            productId: product._id
-        }).sort({ isArchived: 1, expiryDate: 1 }).lean();
+            productId: product._id,
+            isArchived: false,
+            quantity: { $gt: 0 }
+        }).sort({ expiryDate: 1 }).lean();
 
         if (batches.length === 0) {
             batches = [{
@@ -374,8 +385,10 @@ export const searchProductsInStore = async (query, storeId) => {
 
         const productIds = products.map(p => p._id);
         const batches = await Batch.find({
-            productId: { $in: productIds }
-        }).sort({ isArchived: 1, expiryDate: 1 }).lean();
+            productId: { $in: productIds },
+            isArchived: false,
+            quantity: { $gt: 0 }
+        }).sort({ expiryDate: 1 }).lean();
 
         const batchMap = {};
         for (const b of batches) {

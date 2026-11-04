@@ -13,14 +13,20 @@ export const generateBatchNumber = async (productId) => {
 
 /**
  * Recalculate and update Product.quantity as the sum of active batch quantities.
- * This keeps the denormalized cache accurate for existing code (billing, low-stock, analytics).
+ * Automatically archives any batch whose quantity has become 0.
  */
 export const syncProductQuantity = async (productId, storeId = null) => {
-  // All batches for this productId belong to this product.
-  // Finding by productId directly avoids any store string vs ObjectId type mismatch.
+  // Automatically archive any batch whose quantity became 0
+  await Batch.updateMany(
+    { productId, quantity: { $lte: 0 }, isArchived: false },
+    { $set: { isArchived: true, quantity: 0 } }
+  );
+
+  // All active batches with quantity > 0
   const activeBatches = await Batch.find({
     productId,
     isArchived: false,
+    quantity: { $gt: 0 },
   });
   const totalQty = activeBatches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
 
@@ -59,10 +65,16 @@ export const createFirstBatch = async ({
   batchNumber,
 }) => {
   const bn = batchNumber || (await generateBatchNumber(productId));
+  const qty = Math.max(0, Number(quantity) || 0);
 
   // Check if first batch already exists
   const existing = await Batch.findOne({ productId, batchNumber: bn });
   if (existing) {
+    if (qty > 0 && existing.isArchived) {
+      existing.isArchived = false;
+      existing.quantity = qty;
+      await existing.save();
+    }
     return existing;
   }
 
@@ -71,10 +83,11 @@ export const createFirstBatch = async ({
     store: storeId,
     batchNumber: bn,
     expiryDate: expiryDate || null,
-    quantity: Math.max(0, Number(quantity) || 0),
+    quantity: qty,
     buyingPrice: Math.max(0, Number(buyingPrice) || 0),
     sellingPrice: Math.max(0, Number(sellingPrice) || 0),
     createdBy: createdBy || null,
+    isArchived: qty === 0,
   });
 
   return batch;
@@ -96,22 +109,22 @@ export const createBatch = async (productId, batchData, storeId = null, userId =
   }
 
   const bn = batchData.batchNumber?.trim() || (await generateBatchNumber(productId));
+  const qty = Math.max(0, Number(batchData.quantity) || 0);
 
   // If batch with same batch number already exists -> update initial quantity + entered quantity
   const existing = await Batch.findOne({ productId, batchNumber: bn });
   if (existing) {
-    const additionalQty = Math.max(0, Number(batchData.quantity) || 0);
-    existing.quantity = (existing.quantity || 0) + additionalQty;
+    existing.quantity = (existing.quantity || 0) + qty;
     if (batchData.expiryDate) {
       existing.expiryDate = batchData.expiryDate;
     }
-    if (batchData.sellingPrice !== undefined && Number(batchData.sellingPrice) > 0) {
-      existing.sellingPrice = Number(batchData.sellingPrice);
+    if (batchData.buyingPrice !== undefined) {
+      existing.buyingPrice = Math.max(0, Number(batchData.buyingPrice) || 0);
     }
-    if (batchData.buyingPrice !== undefined && Number(batchData.buyingPrice) > 0) {
-      existing.buyingPrice = Number(batchData.buyingPrice);
+    if (batchData.sellingPrice !== undefined) {
+      existing.sellingPrice = Math.max(0, Number(batchData.sellingPrice) || 0);
     }
-    if (existing.isArchived && existing.quantity > 0) {
+    if (existing.quantity > 0) {
       existing.isArchived = false;
     }
     await existing.save();
@@ -124,22 +137,20 @@ export const createBatch = async (productId, batchData, storeId = null, userId =
     store: effectiveStoreId,
     batchNumber: bn,
     expiryDate: batchData.expiryDate || null,
-    manufacturingDate: batchData.manufacturingDate || null,
-    quantity: Math.max(0, Number(batchData.quantity) || 0),
-    buyingPrice: Math.max(0, Number(batchData.buyingPrice) || 0),
-    sellingPrice: Math.max(0, Number(batchData.sellingPrice) || 0),
-    createdBy: userId || product.createdBy || null,
+    quantity: qty,
+    buyingPrice: Math.max(0, Number(batchData.buyingPrice ?? product.buyingPrice ?? 0)),
+    sellingPrice: Math.max(0, Number(batchData.sellingPrice ?? product.sellingPrice ?? 0)),
+    createdBy: userId || null,
+    isArchived: qty === 0,
   });
 
-  // Keep Product.quantity in sync
   await syncProductQuantity(productId, effectiveStoreId);
-
   return batch;
 };
 
 /**
  * Add stock to an existing batch.
- * Returns the updated batch. Also syncs Product.quantity.
+ * Increments quantity and syncs Product.quantity. Unarchives batch if stock becomes > 0.
  */
 export const addStockToBatch = async (batchId, additionalQty, storeId = null, userId = null) => {
   const batch = await Batch.findById(batchId);
@@ -149,95 +160,53 @@ export const addStockToBatch = async (batchId, additionalQty, storeId = null, us
 
   const qty = Number(additionalQty);
   if (isNaN(qty) || qty <= 0) {
-    throw new ApiError("Additional quantity must be a positive number", 400);
+    throw new ApiError("Quantity to add must be a positive number", 400);
   }
 
-  batch.quantity = (Number(batch.quantity) || 0) + qty;
+  batch.quantity = (batch.quantity || 0) + qty;
   // If it was archived (qty was 0 before), un-archive it
-  if (batch.isArchived) {
+  if (batch.quantity > 0) {
     batch.isArchived = false;
   }
   await batch.save();
 
-  // Keep Product.quantity in sync
-  await syncProductQuantity(batch.productId, batch.store);
-
+  await syncProductQuantity(batch.productId, storeId || batch.store);
   return batch;
 };
 
 /**
- * Get all active (non-archived) batches for a product.
+ * Get all active (non-archived) batches for a product with quantity > 0.
  * Sorted by expiryDate ascending (FEFO — First Expired, First Out).
  */
 export const getActiveBatchesByProduct = async (productId, storeId = null) => {
-  const query = { productId, isArchived: false };
+  // Automatically archive any batches with quantity <= 0
+  await Batch.updateMany(
+    { productId, quantity: { $lte: 0 }, isArchived: false },
+    { $set: { isArchived: true, quantity: 0 } }
+  );
+
+  const query = { productId, isArchived: false, quantity: { $gt: 0 } };
   if (storeId && storeId !== "undefined" && storeId !== "null") query.store = storeId;
   let batches = await Batch.find(query).sort({ expiryDate: 1 });
-
-  if (batches.length === 0) {
-    try {
-      const product = await Product.findById(productId);
-      if (product) {
-        const batchNum = product.batchNumber || "BATCH-001";
-        const initialBatch = await Batch.create({
-          productId: product._id,
-          store: product.store,
-          batchNumber: batchNum,
-          expiryDate: product.expDate || null,
-          quantity: Math.max(0, Number(product.quantity) || 0),
-          buyingPrice: Math.max(0, Number(product.buyingPrice) || 0),
-          sellingPrice: Math.max(0, Number(product.sellingPrice) || 0),
-          createdBy: product.createdBy || null,
-          isArchived: Number(product.quantity || 0) === 0,
-        });
-        if (!initialBatch.isArchived) {
-          batches = [initialBatch];
-        }
-      }
-    } catch (backfillErr) {
-      console.warn("[BATCH SERVICE] Auto-backfill active batch error:", backfillErr.message);
-    }
-  }
 
   return batches;
 };
 
 /**
- * Get all batches (including archived) for a product.
- * If product has stock but 0 batches, automatically creates BATCH-001 for seamless backward-compatibility.
+ * Get all available batches for a product.
+ * Returns only active batches with quantity > 0.
  */
 export const getAllBatchesByProduct = async (productId, storeId = null) => {
-  const query = { productId };
+  // Automatically archive any batches with quantity <= 0
+  await Batch.updateMany(
+    { productId, quantity: { $lte: 0 }, isArchived: false },
+    { $set: { isArchived: true, quantity: 0 } }
+  );
+
+  const query = { productId, isArchived: false, quantity: { $gt: 0 } };
   if (storeId && storeId !== "undefined" && storeId !== "null") query.store = storeId;
 
-  let batches = await Batch.find(query).sort({
-    isArchived: 1,
-    expiryDate: 1,
-  });
-
-  // Auto-backfill: if product has no batches yet, generate BATCH-001 from product data
-  if (batches.length === 0) {
-    try {
-      const product = await Product.findById(productId);
-      if (product) {
-        const initialBatch = await Batch.create({
-          productId: product._id,
-          store: product.store,
-          batchNumber: product.batchNumber || "BATCH-001",
-          expiryDate: product.expDate || null,
-          quantity: Math.max(0, Number(product.quantity) || 0),
-          buyingPrice: Math.max(0, Number(product.buyingPrice) || 0),
-          sellingPrice: Math.max(0, Number(product.sellingPrice) || 0),
-          createdBy: product.createdBy || null,
-          isArchived: Number(product.quantity || 0) === 0,
-        });
-        batches = [initialBatch];
-      }
-    } catch (backfillErr) {
-      console.warn("[BATCH SERVICE] Auto-backfill batch error:", backfillErr.message);
-    }
-  }
-
+  let batches = await Batch.find(query).sort({ expiryDate: 1 });
   return batches;
 };
 
@@ -250,13 +219,16 @@ export const archiveBatch = async (batchId, storeId = null) => {
     throw new ApiError("Batch not found", 404);
   }
   batch.isArchived = true;
+  batch.quantity = 0;
   await batch.save();
-  await syncProductQuantity(batch.productId, batch.store);
+
+  await syncProductQuantity(batch.productId, storeId || batch.store);
   return batch;
 };
 
 /**
  * Decrement quantity from a specific batch after a sale.
+ * When quantity becomes 0, automatically archives the batch so it is removed from all available places.
  * Falls back to decrementing the batch with earliest expiry (FEFO) if batchId not provided.
  */
 export const decrementBatchStock = async (
@@ -266,22 +238,26 @@ export const decrementBatchStock = async (
   batchId = null
 ) => {
   if (batchId) {
-    const batch = await Batch.findOne({
-      _id: batchId,
-      productId,
-      store: storeId,
-    });
+    const query = { _id: batchId, productId };
+    if (storeId) query.store = storeId;
+    let batch = await Batch.findOne(query);
+    if (!batch) {
+      batch = await Batch.findOne({ _id: batchId, productId });
+    }
     if (!batch) return null;
+
     batch.quantity = Math.max(0, batch.quantity - qtyToSubtract);
+    if (batch.quantity === 0) {
+      batch.isArchived = true;
+    }
     await batch.save();
     await syncProductQuantity(productId, storeId);
     return [batch];
   }
 
-  // FEFO: subtract from earliest-expiry active batches
+  // FEFO: subtract from earliest-expiry active batches with quantity > 0
   const batches = await Batch.find({
     productId,
-    store: storeId,
     isArchived: false,
     quantity: { $gt: 0 },
   }).sort({ expiryDate: 1 });
@@ -294,6 +270,9 @@ export const decrementBatchStock = async (
     const take = Math.min(batch.quantity, remaining);
     batch.quantity -= take;
     remaining -= take;
+    if (batch.quantity === 0) {
+      batch.isArchived = true;
+    }
     await batch.save();
     updated.push(batch);
   }

@@ -42,15 +42,13 @@ const saleItemSchema = new mongoose.Schema(
       ref: "Batch",
       default: null,
     },
-    profitSnapshot: {},
     batchNumberSnapshot: {
       type: String,
       default: null,
     },
     profitSnapshot: {
       type: Number,
-      required: true,
-      min: 0,
+      default: 0,
     },
   },
   { _id: false }
@@ -75,6 +73,12 @@ const saleSchema = new mongoose.Schema(
       ref: "Cart",
       required: true,
       unique: true,
+      index: true,
+    },
+    billNumber: {
+      type: String,
+      trim: true,
+      default: null,
       index: true,
     },
     buyer: {

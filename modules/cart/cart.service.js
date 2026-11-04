@@ -1,5 +1,5 @@
-import { Cart } from "../../models/index.js";
-import { Product } from "../../models/index.js";
+import mongoose from "mongoose";
+import { Cart, Product, Sale } from "../../models/index.js";
 import { ApiError } from "../../utils/ApiError.js";
 import { assertCartAccess, assertStoreOwner } from "../store/storeAccess.service.js";
 import { materializeSaleFromCart } from "../sale/sale.service.js";
@@ -47,7 +47,7 @@ export const startScanning = async (cartId) => {
   return cart;
 };
 
-export const addItemToCart = async (cartId, productId, quantity = 1) => {
+export const addItemToCart = async (cartId, productId, quantity = 1, batchId = null, batchNumber = null) => {
   const cart = await Cart.findById(cartId);
   if (!cart) throw new ApiError("Cart not found", 404);
   if (cart.status !== "scanning" && cart.status !== "open") {
@@ -61,9 +61,12 @@ export const addItemToCart = async (cartId, productId, quantity = 1) => {
     throw new ApiError("Insufficient stock", 400);
 
   const productPrice = Number(product.sellingPrice ?? product.price ?? 0);
+  const safeBatchId = batchId && mongoose.isValidObjectId(batchId) ? batchId : null;
 
   const itemIndex = cart.products.findIndex(
-    (p) => p.product.toString() === productId,
+    (p) =>
+      p.product.toString() === productId &&
+      String(p.batchId || "") === String(safeBatchId || ""),
   );
 
   if (itemIndex > -1) {
@@ -74,6 +77,8 @@ export const addItemToCart = async (cartId, productId, quantity = 1) => {
       product: productId,
       quantity,
       price: productPrice,
+      batchId: safeBatchId,
+      batchNumber: batchNumber || null,
     });
   }
 
@@ -89,9 +94,14 @@ export const addItemToCart = async (cartId, productId, quantity = 1) => {
 
 export const processPayment = async (
   cartId,
-  paymentMethod,
-  amountPaid,
-  metadata = {},
+  paymentMethodOrId,
+  subtotalOrAmount,
+  discount = null,
+  totalPrice = null,
+  buyer = null,
+  customerName = null,
+  customerPhone = null,
+  customerEmail = null,
 ) => {
   const cart = await Cart.findById(cartId);
   if (!cart) throw new ApiError("Cart not found", 404);
@@ -99,10 +109,30 @@ export const processPayment = async (
     throw new ApiError("Cart is already completed", 400);
   }
 
-  cart.paymentMethod = paymentMethod;
-  cart.amountPaid = amountPaid;
+  const rawPaymentStr = String(paymentMethodOrId || "cash");
+  const parsedMethod = rawPaymentStr.includes("-") ? rawPaymentStr.split("-")[0] : rawPaymentStr;
+
+  cart.paymentId = rawPaymentStr;
+  cart.paymentMethod = parsedMethod;
+  if (subtotalOrAmount !== undefined && subtotalOrAmount !== null) {
+    cart.subtotal = Number(subtotalOrAmount) || 0;
+  }
+  if (discount) {
+    cart.discount = discount;
+  }
+  if (totalPrice !== null && totalPrice !== undefined) {
+    cart.totalPrice = Number(totalPrice) || 0;
+    cart.amountPaid = Number(totalPrice) || 0;
+  } else if (subtotalOrAmount !== undefined) {
+    cart.amountPaid = Number(subtotalOrAmount) || 0;
+  }
   cart.paymentStatus = "paid";
-  cart.paymentMetadata = metadata;
+  cart.status = "payment_pending";
+
+  if (buyer) cart.buyer = buyer;
+  if (customerName) cart.customerName = customerName;
+  if (customerPhone) cart.customerPhone = customerPhone;
+  if (customerEmail) cart.customerEmail = customerEmail;
 
   await cart.save();
   return cart;
@@ -242,6 +272,28 @@ export const quickCheckout = async (userId, checkoutData) => {
   const dbProducts = await Product.find({ _id: { $in: productIds } });
   const productMap = new Map(dbProducts.map((p) => [p._id.toString(), p]));
 
+  // Aggregate requested stock per product to validate against available stock
+  const productRequestedQty = {};
+  for (const item of products) {
+    const pId = String(item._id || item.productId);
+    const qty = Number(item.billedQuantity || item.quantity || 1);
+    productRequestedQty[pId] = (productRequestedQty[pId] || 0) + qty;
+  }
+
+  // Validate stock
+  for (const [pId, neededQty] of Object.entries(productRequestedQty)) {
+    const product = productMap.get(pId);
+    if (!product) {
+      throw new ApiError(`Product not found with ID ${pId}`, 404);
+    }
+    if ((product.quantity || 0) < neededQty) {
+      throw new ApiError(
+        `Insufficient stock for "${product.name}". Available: ${product.quantity}, Requested: ${neededQty}`,
+        400,
+      );
+    }
+  }
+
   // Build cart items array
   const cartProducts = [];
   let calculatedSubtotal = 0;
@@ -249,35 +301,37 @@ export const quickCheckout = async (userId, checkoutData) => {
   for (const item of products) {
     const pId = String(item._id || item.productId);
     const product = productMap.get(pId);
-    if (!product) {
-      throw new ApiError(`Product not found: ${item.name || pId}`, 404);
-    }
-
     const qty = Number(item.billedQuantity || item.quantity || 1);
-    if (product.quantity < qty) {
-      throw new ApiError(
-        `Insufficient stock for "${product.name}". Available: ${product.quantity}, Requested: ${qty}`,
-        400,
-      );
-    }
-
     const price = Number(item.price ?? product.sellingPrice ?? product.price ?? 0);
+    const safeBatchId =
+      item.batchId && mongoose.isValidObjectId(item.batchId)
+        ? item.batchId
+        : null;
+
     cartProducts.push({
       product: product._id,
       quantity: qty,
       price,
-      batchId: item.batchId || null,
+      batchId: safeBatchId,
       batchNumber: item.batchNumber || null,
     });
     calculatedSubtotal += price * qty;
   }
 
-  // Reuse open cart or create a new cart
-  let cart = await Cart.findOne({
+  // Reuse an open cart only if it hasn't already been materialized into a sale
+  let cart = null;
+  const candidateCart = await Cart.findOne({
     user: userId,
     store: storeId,
     status: { $in: ["open", "scanning"] },
   });
+
+  if (candidateCart) {
+    const saleExists = await Sale.findOne({ cart: candidateCart._id });
+    if (!saleExists) {
+      cart = candidateCart;
+    }
+  }
 
   if (!cart) {
     cart = new Cart({
@@ -297,6 +351,7 @@ export const quickCheckout = async (userId, checkoutData) => {
   cart.subtotal = finalSubtotal;
   cart.discount = finalDiscount;
   cart.totalPrice = finalTotal;
+  cart.amountPaid = finalTotal;
   cart.paymentId = `${paymentMethod}-${Date.now()}`;
   cart.paymentMethod = paymentMethod;
   cart.paymentStatus = "paid";
@@ -317,4 +372,3 @@ export const quickCheckout = async (userId, checkoutData) => {
     billNumber: result.sale?.billNumber || result.cart?.billNumber,
   };
 };
-
