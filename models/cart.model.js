@@ -11,6 +11,11 @@ const cartSchema = new mongoose.Schema({
         ref: 'Store',
         required: true
     },
+    billNumber: {
+        type: String,
+        trim: true,
+        default: null
+    },
     buyer: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Buyer',
@@ -46,6 +51,16 @@ const cartSchema = new mongoose.Schema({
             price: {
                 type: Number,
                 required: true
+            },
+            batchId: {
+                type: mongoose.Schema.Types.ObjectId,
+                ref: 'Batch',
+                default: null
+            },
+            batchNumber: {
+                type: String,
+                trim: true,
+                default: null
             }
         }
     ],
@@ -99,7 +114,20 @@ const cartSchema = new mongoose.Schema({
         default: 'pending'
     },
     paymentId: {
-        type: String
+        type: String,
+        default: null
+    },
+    paymentMethod: {
+        type: String,
+        default: 'cash'
+    },
+    amountPaid: {
+        type: Number,
+        default: 0
+    },
+    paymentMetadata: {
+        type: mongoose.Schema.Types.Mixed,
+        default: {}
     }
 }, { timestamps: true });
 

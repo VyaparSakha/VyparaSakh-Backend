@@ -15,6 +15,7 @@ import buyerRoutes from "../modules/buyer/buyer.routes.js";
 import notificationRoutes from "../modules/notification/notification.routes.js";
 import purchaseOrderRoutes from "../modules/purchaseOrder/purchaseOrder.routes.js";
 import grnRoutes from "../modules/grn/grn.routes.js";
+import batchRoutes from "../modules/batch/batch.routes.js";
 import meRoutes from "../modules/me/me.routes.js";
 import { Router } from "express";
 
@@ -48,5 +49,6 @@ router.use("/buyers", buyerRoutes);
 router.use("/notifications", notificationRoutes);
 router.use("/purchase-orders", purchaseOrderRoutes);
 router.use("/grns", grnRoutes);
+router.use("/batches", batchRoutes);
 
 export default router;
