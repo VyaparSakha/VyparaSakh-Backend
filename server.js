@@ -33,9 +33,9 @@ const aiProxy = createProxyMiddleware({
 // Route /api/ai/* HTTP requests through the proxy (if any REST calls needed)
 app.use("/ws", aiProxy);
 
-// Handle WebSocket upgrade events — forward /ws/voice to FastAPI
+// Handle WebSocket upgrade events — forward all /ws/* routes (voice, copilot, chat) to FastAPI
 server.on("upgrade", (req, socket, head) => {
-    if (req.url && req.url.startsWith("/ws/voice")) {
+    if (req.url && (req.url.startsWith("/ws/") || req.url.includes("/copilot/ws"))) {
         aiProxy.upgrade(req, socket, head);
     }
 });
